@@ -9,6 +9,22 @@ The project boots through GRUB into an x86-64 kernel and provides a text-based u
 DenOS is actively developed. Its features, interfaces, and level of completeness can differ between source snapshots and releases. This README describes the project in general and intentionally avoids documenting a fixed set of shell commands or key bindings that may not exist in every version.
 
 ## Project overview
+## Build on Ubuntu/Debian
+
+Install the host-side build dependencies:
+
+```sh
+sudo apt update
+sudo apt install build-essential nasm grub-pc-bin grub-common xorriso mtools qemu-system-x86 python3
+```
+
+The Makefile exposes three user-facing commands:
+
+```sh
+make clean
+make
+make run
+```
 
 DenOS is built to explore the core components of an operating system in a small codebase. The project has included work in the following areas:
 
