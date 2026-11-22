@@ -61,16 +61,6 @@ run life
 
 `cc source.c program` (or `cc source.c -o program`) compiles the source stored in the DenOS filesystem and saves an AEX executable as `program.ax`. `run program` (or `./program`) loads and executes that compiled program in the AEX virtual machine. Input is line-based; `scanf`-style input is supported for `%d` and `%c`. Both source files and compiled executables are persistent when the ATA disk is available. The `df` command reports filesystem usage (used, free and total file-data space) and identifies whether the mounted volume is persistent ATA storage or a temporary RAM fallback. `neofetch` shows the same storage capacity and usage alongside the system details. The volume can store up to 786,384 bytes of file contents across 48 fixed slots; unused space inside an already allocated file slot is reserved and cannot be reused by another file. `df` reports used, reserved, free-slot, and total capacity separately. `disk` (also `diskinfo`) reports the physical ATA device model and raw capacity, while `df` reports the mounted filesystem's usable file-data pool.
 
-## Shell and 1980s-style console
-
-The console uses the classic 80x25 VGA text display, with blue and cyan title bars and a root-style prompt. This release is DenOS 0.3.1; common DOS-style shortcuts include `?`, `cls`, `dir`, `type`, `new`, `del`, `edit`, `sys`, `mem`, `disk`, `ver`, and `run`:
-
-```text
-root@DenOs:/#
-```
-
-`whoami` prints `root`, `hostname` prints `DenOs`, `ver` prints the release, and `sys` (also available as `neofetch` and `sysinfo`) draws a compact system summary with the mounted storage device, volume capacity, used space, reserved slot space, free space, file count, and uptime. The prompt is a visual shell identity only: this version does not yet have user accounts, privilege separation, or filesystem permissions.
-
 ## Vim-style editor
 
 The built-in editor is a full-screen, keyboard-driven Vim-style editor with C syntax highlighting. A visible block cursor shows the insertion position, while a `>` gutter marker and blue current-line highlight show which source line is active. The status bar also shows the exact line and column. It supports normal, insert, and Ex-command modes; line numbers; arrow keys and `h/j/k/l`; search; one-step undo/redo; line yank/delete/paste; and the common save/quit commands.
