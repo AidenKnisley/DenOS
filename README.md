@@ -48,7 +48,6 @@ DenOS is developed around a few simple goals:
 - **Understandability:** Keep the implementation approachable for someone learning about kernels and low-level programming.
 - **Incremental development:** Build and improve operating-system components one step at a time.
 - **Minimal dependencies at runtime:** Keep the kernel small and avoid relying on a full host operating system once it has booted.
-- **Classic computing experience:** Use a straightforward text interface inspired by personal computers and operating systems from the 1980s.
 - **Experimentation:** Provide room to explore hardware drivers, filesystems, language tools, and kernel architecture.
 
 ## Building and running
