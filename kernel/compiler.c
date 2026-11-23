@@ -5,6 +5,7 @@
  * Aiden C is a deliberately small freestanding C subset compiler.
  * It compiles one int main(void) function to AEX1 stack bytecode.
  */
+
 #define MAX_CODE 768
 #define MAX_STRINGS 2048
 #define MAX_SYMBOLS 160
