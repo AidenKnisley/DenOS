@@ -122,3 +122,7 @@ AEX files contain compact bytecode, not x86-64 native machine code. The kernel e
 - Full Vim-compatible editor, shell scripting, pipes, and permissions.
 
 The `toolchain/build-cross-gcc.sh` script is still a host-side cross-toolchain experiment. It is not the compiler used by the in-OS `cc` command.
+
+#website
+
+https://aidenknisley.github.io/denos-website/
