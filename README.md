@@ -143,3 +143,5 @@ docs/                     subsystem, language, editor, and CLI manuals
 - Graphics code is present, but no GUI or userspace graphics ABI is started by normal boot.
 
 DenOS is a serious learning project. The next major milestone is a protected user-mode process model and versioned syscall boundary—not claiming completeness before those foundations exist.
+
+https://aidenknisley.github.io/denos-website/
