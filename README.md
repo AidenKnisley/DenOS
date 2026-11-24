@@ -123,6 +123,6 @@ AEX files contain compact bytecode, not x86-64 native machine code. The kernel e
 
 The `toolchain/build-cross-gcc.sh` script is still a host-side cross-toolchain experiment. It is not the compiler used by the in-OS `cc` command.
 
-#website
+## website
 
 https://aidenknisley.github.io/denos-website/
