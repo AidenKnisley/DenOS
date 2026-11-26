@@ -3,6 +3,7 @@
 from pathlib import Path
 import sys
 
+
 out = Path(sys.argv[1])
 files = [Path(p) for p in sys.argv[2:]]
 
