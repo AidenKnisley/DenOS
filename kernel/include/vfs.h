@@ -4,8 +4,8 @@
 #include "types.h"
 
 #define VFS_MOUNT_CAP 8
-#define VFS_PATH_CAP 64
-#define VFS_NAME_CAP 64
+#define VFS_PATH_CAP 256
+#define VFS_NAME_CAP 256
 #define VFS_MOUNT_READ_ONLY 0x01u
 #define VFS_TYPE_FILE 1u
 #define VFS_TYPE_DIRECTORY 2u

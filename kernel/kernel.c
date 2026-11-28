@@ -23,6 +23,7 @@
 #include "env.h"
 #include "history.h"
 #include "service.h"
+#include "apps.h"
 
 extern char _kernel_start[];
 extern char _kernel_end[];
@@ -48,8 +49,8 @@ static int heap_health_service(void *context) {
 
 static void register_core_devices(void) {
     device_registry_init();
-    (void)device_register("VGA text console", "vga-text-80x25", DEVICE_CLASS_DISPLAY,
-                          DEVICE_STATE_READY);
+    (void)device_register("VGA text console", "vga-text-80x25",
+                          DEVICE_CLASS_DISPLAY, DEVICE_STATE_READY);
     (void)device_register("PS/2 keyboard", "i8042-poll", DEVICE_CLASS_INPUT,
                           DEVICE_STATE_READY);
     (void)device_register("PIT clock", "8253-pit", DEVICE_CLASS_TIMER,
@@ -74,7 +75,7 @@ void kernel_main(u32 multiboot_magic, const void *multiboot_info) {
     serial_init();
     serial_write("\033[2J\033[H");
     serial_write("\033[1;36m" DENOS_NAME " " DENOS_VERSION "\033[0m\n");
-    serial_write("\033[1;34m64-bit command-line operating system\033[0m\n");
+    serial_write("\033[1;34m64-bit operating system\033[0m\n");
     serial_write("\033[1;34m----------------------------------------\033[0m\n\n");
 
     klog_init();
@@ -93,7 +94,9 @@ void kernel_main(u32 multiboot_magic, const void *multiboot_info) {
         u32 info_size = *(const u32 *)multiboot_info;
         boot_info_mapped = info_size >= 16u &&
                            info_size <= PMM_ADDRESS_LIMIT - boot_info_address;
-        if (boot_info_mapped) bootargs_init(multiboot_info, info_size);
+        if (boot_info_mapped) {
+            bootargs_init(multiboot_info, info_size);
+        }
     }
     safe_mode = bootargs_has("safe-mode");
     if (bootargs_get()[0]) klogf(KLOG_INFO, "boot arguments: %s", bootargs_get());
@@ -142,6 +145,7 @@ void kernel_main(u32 multiboot_magic, const void *multiboot_info) {
 
     fs_init();
     fs_seed_user_tree();
+    apps_install(); /* Installs bundled Aiden examples without overwriting user edits. */
     if (vfs_init() == 0) {
         (void)boot_status_add("VFS mount namespace", BOOT_RESULT_OK);
         klog_write(KLOG_INFO, "mounted DenFS root, read-only procfs, and devfs");
@@ -195,6 +199,7 @@ void kernel_main(u32 multiboot_magic, const void *multiboot_info) {
     }
     (void)boot_status_add("device registry", BOOT_RESULT_OK);
     boot_status("kernel services initialized");
+
 
     serial_write("\nDenOS command console is ready. Type 'help' for commands.\n");
     serial_write("Use 'sysinfo', 'devices', 'services', 'mounts', 'paging' and 'bootlog' to inspect the system.\n");

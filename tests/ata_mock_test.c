@@ -323,11 +323,11 @@ int main(void) {
     if (fs_read("missing.txt") != 0 ||
         strcmp(fs_last_error_message(), "file or directory does not exist") != 0)
         fail("missing file did not produce a not-found diagnostic");
-    char oversized_name[65];
+    char oversized_name[257];
     memset(oversized_name, 'n', sizeof(oversized_name));
-    oversized_name[64] = 0;
+    oversized_name[256] = 0;
     if (fs_touch(oversized_name) == 0 ||
-        strcmp(fs_last_error_message(), "path is longer than 63 characters") != 0)
+        strcmp(fs_last_error_message(), "path is longer than 255 characters") != 0)
         fail("filesystem did not explain an overlong filename");
     char oversized_data[65537];
     memset(oversized_data, 'd', sizeof(oversized_data));
@@ -340,8 +340,12 @@ int main(void) {
     if (!fs_read("persist.txt") ||
         strcmp(fs_read("persist.txt"), "hello from the ATA filesystem") != 0)
         fail("saved file was not readable from the filesystem cache");
+    if (fs_touch("persist.txt") != 0 ||
+        !fs_read("persist.txt") ||
+        strcmp(fs_read("persist.txt"), "hello from the ATA filesystem") != 0)
+        fail("touching an existing file did not preserve its contents");
     {
-        char entry_name[64];
+        char entry_name[256];
         usize entry_size = 0;
         if (fs_get_entry(0, entry_name, sizeof(entry_name), &entry_size) != 0 ||
             strcmp(entry_name, "welcome.txt") != 0 ||
@@ -382,6 +386,12 @@ int main(void) {
         fail("could not create nested directories");
     if (!fs_is_directory("home/user/Documents"))
         fail("new directory was not recognized");
+    if (fs_touch("home/user") == 0 ||
+        strcmp(fs_last_error_message(), "path refers to a directory, not a file") != 0)
+        fail("touch accepted an existing directory as a file");
+    if (fs_write("home/user", "not a directory") == 0 ||
+        strcmp(fs_last_error_message(), "path refers to a directory, not a file") != 0)
+        fail("file write accepted an existing directory as a file");
     if (fs_write("home/user/Documents/Meeting Notes.txt", "Bring the project notes.") != 0)
         fail("could not write a file with spaces in a nested directory");
     if (!fs_read("home/user/Documents/Meeting Notes.txt") ||
@@ -391,7 +401,7 @@ int main(void) {
         strcmp(fs_last_error_message(), "directory is not empty; remove its contents first") != 0)
         fail("non-empty directory removal was not rejected safely");
     {
-        char entry[64];
+        char entry[256];
         usize size = 0;
         int type = 0;
         if (fs_entry_count_in_dir("home/user/Documents") != 1u ||
@@ -411,8 +421,36 @@ int main(void) {
         fs_read("home/user/Documents/Meeting Notes-copy.txt") ||
         !fs_read("home/user/Documents/Archive.txt"))
         fail("file move did not create the destination and remove the source");
+    if (!fs_exists("home/user/Documents/Archive.txt") ||
+        !fs_is_file("home/user/Documents/Archive.txt") ||
+        !fs_is_directory("home/user/Documents"))
+        fail("filesystem existence/type queries returned incorrect results");
+    if (fs_rename("home/user/Documents/Archive.txt", "home/user/Documents/Renamed Archive.txt") != 0 ||
+        fs_exists("home/user/Documents/Archive.txt") ||
+        !fs_is_file("home/user/Documents/Renamed Archive.txt"))
+        fail("filesystem rename API did not move the file to its new long name");
+    if (fs_rename("home/user/Documents/Renamed Archive.txt", "home/user/Documents/Archive.txt") != 0)
+        fail("filesystem rename API could not restore the expected test path");
+    if (fs_mkdir_p("home/user/nested/more/deep") != 0 ||
+        !fs_is_directory("home/user/nested") ||
+        !fs_is_directory("home/user/nested/more") ||
+        !fs_is_directory("home/user/nested/more/deep"))
+        fail("recursive mkdir did not create all missing parent directories");
+    if (fs_mkdir_p("home/user/nested/more/deep") != 0)
+        fail("recursive mkdir was not idempotent for an existing directory tree");
+    if (fs_write("home/user/not-a-directory", "file") != 0 ||
+        fs_mkdir_p("home/user/not-a-directory/child") == 0 ||
+        strcmp(fs_last_error_message(), "a parent path component is not a directory") != 0)
+        fail("recursive mkdir did not reject an existing file in the parent chain");
+    if (fs_remove("home/user/not-a-directory") != 0 ||
+        fs_remove("home/user/nested/more/deep") != 0 ||
+        fs_remove("home/user/nested/more") != 0 ||
+        fs_remove("home/user/nested") != 0)
+        fail("recursive mkdir test directories could not be cleaned up");
+    if (fs_mkdir_p("home/user/bad//path") == 0)
+        fail("recursive mkdir accepted an invalid empty path component");
     {
-        char normalized[64];
+        char normalized[256];
         if (fs_path_normalize("home/user", "../Documents/Meeting Notes.txt", normalized, sizeof(normalized)) != 0 ||
             strcmp(normalized, "home/Documents/Meeting Notes.txt") != 0)
             fail("relative path normalization returned the wrong path");
@@ -429,6 +467,50 @@ int main(void) {
         fs_remove("home/user/Documents") != 0 || fs_remove("home/user") != 0 || fs_remove("home") != 0)
         fail("could not remove empty directories after deleting their contents");
 
+    /* DenFS v4 accepts long, readable paths and preserves them after remount. */
+    {
+        char long_path[220];
+        if (fs_mkdir("home") != 0 || fs_mkdir("home/user") != 0 ||
+            fs_mkdir("home/user/documents") != 0)
+            fail("could not create long-path test directories");
+        strcpy(long_path, "home/user/documents/");
+        memset(long_path + strlen(long_path), 'a', 160);
+        long_path[strlen("home/user/documents/") + 160] = 0;
+        strcat(long_path, ".md");
+        if (fs_write(long_path, "long-name survived") != 0 ||
+            !fs_read(long_path) || strcmp(fs_read(long_path), "long-name survived") != 0)
+            fail("DenFS v4 rejected a valid path longer than the v3 limit");
+        fs_init();
+        if (!fs_read(long_path) || strcmp(fs_read(long_path), "long-name survived") != 0)
+            fail("DenFS v4 did not preserve a long path across remount");
+        if (fs_remove(long_path) != 0) fail("could not remove the long-path test file");
+    }
+    {
+        char max_name[256];
+        memset(max_name, 'n', sizeof(max_name) - 1u);
+        max_name[sizeof(max_name) - 1u] = 0;
+        if (strlen(max_name) != 255u || fs_write(max_name, "255-character name") != 0 ||
+            !fs_read(max_name) || strcmp(fs_read(max_name), "255-character name") != 0)
+            fail("DenFS v4 did not accept the full 255-character path limit");
+        fs_init();
+        if (!fs_read(max_name) || strcmp(fs_read(max_name), "255-character name") != 0)
+            fail("DenFS v4 did not preserve a maximum-length path across remount");
+        if (fs_remove(max_name) != 0) fail("could not remove the maximum-length path test file");
+    }
+
+    /* A v3 image must migrate without losing data before the path table grows. */
+    memset(mock_disk, 0, sizeof(mock_disk));
+    make_old_superblock(3u, 256u, 65536u);
+    make_old_entry(7u, 2u, "home", 0, 37u, 128u);
+    make_old_entry(8u, 2u, "home/user", 0, 37u, 128u);
+    make_old_entry(9u, 1u, "home/user/old-note.txt", "A v3 note survived the path upgrade.\n", 37u, 128u);
+    fs_init();
+    if (!fs_is_persistent() || !fs_read("home/user/old-note.txt") ||
+        strcmp(fs_read("home/user/old-note.txt"), "A v3 note survived the path upgrade.\n") != 0)
+        fail("v3 migration did not preserve nested files");
+    if (mock_disk[0][8] != 4u || mock_disk[0][12] != 0u || mock_disk[0][13] != 1u)
+        fail("v3 migration did not write the v4 filesystem superblock");
+
     /* An unknown filesystem must not be reformatted or have data destroyed. */
     mock_disk[0][0] = 0x55;
     fs_init();
@@ -444,8 +526,8 @@ int main(void) {
     if (!fs_is_persistent() || !fs_read("legacy-note.txt") ||
         strcmp(fs_read("legacy-note.txt"), "Legacy v1 note preserved.\n") != 0)
         fail("v1 migration did not preserve the legacy note");
-    if (mock_disk[0][8] != 3u || mock_disk[0][12] != 0u || mock_disk[0][13] != 1u)
-        fail("v1 migration did not write the v3 filesystem superblock");
+    if (mock_disk[0][8] != 4u || mock_disk[0][12] != 0u || mock_disk[0][13] != 1u)
+        fail("v1 migration did not write the v4 filesystem superblock");
 
     /* A v2 image also carries folders, so verify nested paths survive upgrade. */
     memset(mock_disk, 0, sizeof(mock_disk));
@@ -461,12 +543,12 @@ int main(void) {
         strcmp(fs_read("home/user/Documents/keep.txt"),
                "A v2 document survived the migration.\n") != 0)
         fail("v2 migration did not preserve folders and documents");
-    if (mock_disk[0][8] != 3u || mock_disk[0][12] != 0u || mock_disk[0][13] != 1u)
-        fail("v2 migration did not write the v3 filesystem superblock");
+    if (mock_disk[0][8] != 4u || mock_disk[0][12] != 0u || mock_disk[0][13] != 1u)
+        fail("v2 migration did not write the v4 filesystem superblock");
 
     /* A failed data-sector read must abort the mount rather than silently
        publishing a partial cache as a healthy persistent filesystem. */
-    fail_read_lba = 37u + 3u * 128u; /* Slot 3 contains keep.txt in this v2 image. */
+    fail_read_lba = 133u + 3u * 128u; /* Slot 3 was migrated into the v4 data area. */
     fs_init();
     if (fs_is_persistent())
         fail("filesystem mounted after a required file-data sector read failed");
@@ -499,6 +581,6 @@ int main(void) {
     if (fs_write("another-file.txt", "must also fail") == 0)
         fail("filesystem silently accepted a new RAM-only write after disk failure");
 
-    puts("DenOS storage tests passed: all four IDE positions, IDENTIFY, PIO I/O, filesystem v3 format/remount, v1/v2 migration, nested folders, 64 KiB file support, copy/move, unknown-disk protection, and failed-write rollback.");
+    puts("DenOS storage tests passed: all four IDE positions, IDENTIFY, PIO I/O, filesystem v4 format/remount, v1/v2/v3 migration, nested folders, 64 KiB file support, copy/move, unknown-disk protection, and failed-write rollback.");
     return 0;
 }

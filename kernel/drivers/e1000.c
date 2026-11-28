@@ -1,6 +1,7 @@
 #include "e1000.h"
 #include "pci.h"
 #include "kstring.h"
+#include "e1000_ring.h"
 
 #define E1000_VENDOR 0x8086u
 #define E1000_DEVICE 0x100Eu
@@ -24,7 +25,7 @@
 #define REG_TDT    0x3818u
 #define REG_RAL    0x5400u
 #define REG_RAH    0x5404u
-#define RX_COUNT 16u
+#define RX_COUNT E1000_RX_RING_COUNT
 #define TX_COUNT 8u
 #define BUFFER_SIZE 2048u
 
@@ -43,10 +44,12 @@ static u8 tx_buffers[TX_COUNT][BUFFER_SIZE] __attribute__((aligned(16)));
 static u8 mac[6];
 static u32 rx_index, tx_index, rx_frames, tx_frames;
 static int initialized;
+static int rx_discarding_frame;
 extern void net_receive_frame(const u8 *frame, u16 length);
 
 static u32 reg_read(u32 offset) { return mmio[offset >> 2]; }
 static void reg_write(u32 offset,u32 value) { mmio[offset >> 2]=value; (void)mmio[REG_STATUS >> 2]; }
+static void dma_barrier(void) { __asm__ volatile("" ::: "memory"); }
 static void pause_io(void) { for (volatile u32 i=0;i<1000;i++) __asm__ volatile("pause"); }
 
 int e1000_init(void) {
@@ -55,7 +58,7 @@ int e1000_init(void) {
     if (initialized) return 0;
     if (pci_find_device(E1000_VENDOR,E1000_DEVICE,&dev)<0) return -1;
     bar=dev.bar[0];
-    if (!bar || (bar & 1u) || (bar & 6u)==4u) return -2; /* MMIO, 32-bit BAR only */
+    if (!bar || (bar & 1u) || (bar & 6u) != 0u) return -2; /* 32-bit MMIO BAR only */
     base=bar & ~0xFu;
     if (!base) return -3;
     if (pci_enable_bus_master(&dev)<0) return -4;
@@ -82,23 +85,26 @@ int e1000_init(void) {
     reg_write(REG_TDBAL,(u32)(usize)&tx_desc[0]); reg_write(REG_TDBAH,0);
     reg_write(REG_TDLEN,sizeof(tx_desc)); reg_write(REG_TDH,0); reg_write(REG_TDT,0);
     reg_write(REG_TIPG,0x0060200Au);
-    reg_write(REG_RCTL,(1u<<1)|(1u<<15)); /* receiver + broadcast; 2 KiB buffers */
+    reg_write(REG_RCTL,(1u<<1)|(1u<<15)|(1u<<26)); /* receiver + broadcast + strip FCS */
     reg_write(REG_TCTL,(1u<<1)|(1u<<3)|(0x10u<<4)|(0x40u<<12));
     command=reg_read(REG_CTRL); (void)command;
     initialized=1; rx_index=tx_index=rx_frames=tx_frames=0;
+    rx_discarding_frame=0;
     return 0;
 }
 
 int e1000_send(const void *frame,u16 length) {
-    e1000_tx_desc_t *d;
+    volatile e1000_tx_desc_t *d;
     u32 spins=100000u;
     if (!initialized || !frame || length<14 || length>BUFFER_SIZE) return -1;
     d=&tx_desc[tx_index];
+    dma_barrier();
     while (!(d->status&1u) && spins--) pause_io();
     if (!(d->status&1u)) return -2;
     kmemcpy(tx_buffers[tx_index],frame,length);
     d->length=length; d->cso=0; d->css=0; d->special=0;
     d->command=0x0Bu; /* EOP | IFCS | RS */ d->status=0;
+    dma_barrier();
     tx_index=(tx_index+1u)%TX_COUNT;
     reg_write(REG_TDT,tx_index); tx_frames++;
     return 0;
@@ -107,14 +113,32 @@ int e1000_send(const void *frame,u16 length) {
 void e1000_poll(void) {
     if (!initialized) return;
     for (u32 count=0;count<RX_COUNT;count++) {
-        e1000_rx_desc_t *d=&rx_desc[rx_index];
-        if (!(d->status&1u)) break;
-        if (!(d->errors) && d->length>=14 && d->length<=BUFFER_SIZE) {
-            net_receive_frame(rx_buffers[rx_index],d->length); rx_frames++;
+        u32 completed = rx_index;
+        volatile e1000_rx_desc_t *d=(volatile e1000_rx_desc_t *)&rx_desc[completed];
+        u8 status;
+        e1000_rx_recycle_step_t step;
+        dma_barrier();
+        status = d->status;
+        if (!(status & 0x01u)) break; /* DD: descriptor done. */
+
+        /* The driver intentionally supports one-descriptor Ethernet frames
+         * (the buffers exceed a standard 1500-byte MTU). Drop an oversized
+         * multi-descriptor frame as a whole instead of parsing its tail as a
+         * standalone packet. */
+        if (rx_discarding_frame) {
+            if (status & 0x02u) rx_discarding_frame = 0; /* EOP */
+        } else if (!(status & 0x02u)) {
+            rx_discarding_frame = 1;
+        } else if (!(d->errors) && d->length>=14 && d->length<=BUFFER_SIZE) {
+            net_receive_frame(rx_buffers[completed],d->length);
+            rx_frames++;
         }
+
         d->length=0; d->checksum=0; d->errors=0; d->status=0; d->special=0;
-        reg_write(REG_RDT,rx_index);
-        rx_index=(rx_index+1u)%RX_COUNT;
+        dma_barrier();
+        step = e1000_rx_ring_recycle(completed);
+        reg_write(REG_RDT,step.tail);
+        rx_index=step.next;
     }
 }
 int e1000_link_up(void) { return initialized && (reg_read(REG_STATUS)&2u)!=0; }

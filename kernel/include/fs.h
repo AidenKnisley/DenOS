@@ -14,10 +14,12 @@ enum fs_error {
     FS_ERROR_BUFFER_TOO_SMALL,
     FS_ERROR_ALREADY_EXISTS,
     FS_ERROR_NOT_DIRECTORY,
-    FS_ERROR_DIRECTORY_NOT_EMPTY
+    FS_ERROR_DIRECTORY_NOT_EMPTY,
+    FS_ERROR_IS_DIRECTORY
 };
 
-#define FS_PATH_CAPACITY 64u
+#define FS_PATH_CAPACITY 256u
+#define FS_FILE_MAX_BYTES 65535u
 #define FS_ENTRY_FILE 1
 #define FS_ENTRY_DIRECTORY 2
 
@@ -29,8 +31,12 @@ const char *fs_read(const char *path);
 int fs_remove(const char *path);
 int fs_copy(const char *source, const char *destination);
 int fs_move(const char *source, const char *destination);
+int fs_rename(const char *source, const char *destination);
+int fs_exists(const char *path);
+int fs_is_file(const char *path);
 int fs_touch(const char *path);
 int fs_mkdir(const char *path);
+int fs_mkdir_p(const char *path);
 int fs_is_directory(const char *path);
 void fs_list(void);
 usize fs_file_count(void);

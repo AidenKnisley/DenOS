@@ -38,6 +38,42 @@ void cpu_get_vendor(char *buffer, usize capacity) {
     kstrlcpy(buffer, vendor, capacity);
 }
 
+int cpu_has_rdrand(void) {
+    u32 eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(1u), "c"(0u));
+    (void)ebx;
+    (void)edx;
+    return (ecx & (1u << 30)) != 0;
+}
+
+int cpu_random_bytes(void *buffer, usize length) {
+    u8 *out = (u8 *)buffer;
+    usize remaining = length;
+    if (!length) return 0;
+    if (!buffer || !cpu_has_rdrand()) return -1;
+    while (remaining) {
+        u64 value = 0;
+        unsigned char success = 0;
+        /* RDRAND is permitted to report temporary failure. Retry a bounded
+         * number of times; never substitute the predictable kernel PRNG. */
+        for (unsigned retry = 0; retry < 10u && !success; ++retry) {
+            __asm__ volatile("rdrand %0; setc %1"
+                             : "=r"(value), "=qm"(success));
+        }
+        if (!success) {
+            for (usize i = 0; i < length; ++i) out[i] = 0;
+            return -1;
+        }
+        usize take = remaining < sizeof(value) ? remaining : sizeof(value);
+        for (usize i = 0; i < take; ++i) out[i] = (u8)(value >> (i * 8u));
+        out += take;
+        remaining -= take;
+    }
+    return 0;
+}
+
 void cpu_halt(void) {
     cpu_interrupt_disable();
     for (;;) __asm__ volatile("hlt");

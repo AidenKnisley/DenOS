@@ -5,16 +5,16 @@
 #define SOURCE_CAP 32768
 
 static const char *app_paths[] = {
-    "userland/apps/calc.c",
-    "userland/apps/guess.c",
-    "userland/apps/hello.c",
-    "userland/apps/functions.c",
-    "userland/apps/life.c",
-    "userland/apps/ttt.c",
-    "userland/apps/string-tools.c",
-    "userland/apps/prime-sieve.c",
-    "userland/apps/sort-demo.c",
-    "userland/apps/number-theory.c"
+    "userland/apps/utilities/calc.c",
+    "userland/apps/games/guess.c",
+    "userland/apps/examples/hello.c",
+    "userland/apps/examples/functions.c",
+    "userland/apps/games/life.c",
+    "userland/apps/games/tic-tac-toe.c",
+    "userland/apps/examples/string-tools.c",
+    "userland/apps/examples/prime-sieve.c",
+    "userland/apps/examples/sort-demo.c",
+    "userland/apps/examples/number-theory.c"
 };
 
 int main(void) {

@@ -7,24 +7,26 @@
  * This compiler deliberately uses fixed-size tables and emits AEX6 stack
  * bytecode. The VM also accepts AEX1-AEX5 files from earlier releases for compatibility.
  */
-#define MAX_CODE       768
-#define MAX_STRINGS    2048
-#define MAX_SYMBOLS    160
-#define MAX_NAME       31
+#define MAX_CODE       2048
+#define MAX_STRINGS    8192
+#define MAX_SYMBOLS    512
+#define MAX_NAME       63
 #define TOK_TEXT       128
-#define MAX_CONTROL    32
-#define MAX_PATCHES    96
-#define MAX_FUNCTIONS  32
-#define MAX_PARAMS     16
-#define MAX_CALL_PATCHES 128
+#define MAX_CONTROL    64
+#define MAX_PATCHES    256
+#define MAX_FUNCTIONS  96
+#define MAX_PARAMS     32
+#define MAX_CALL_PATCHES 512
 #define ERROR_TEXT     160
-#define MAX_GLOBALS    64
-#define MAX_GLOBAL_CELLS 256
-#define MAX_SOURCE_BYTES 8192
-#define MAX_MACROS 48
-#define MAX_MACRO_VALUE 128
+#define MAX_GLOBALS    128
+#define MAX_GLOBAL_CELLS 1024
+#define MAX_SOURCE_BYTES 32768
+#define MAX_LOCAL_CELLS 8192
+#define MAX_ARRAY_CELLS 4096
+#define MAX_MACROS 96
+#define MAX_MACRO_VALUE 256
 #define MAX_PP_DEPTH 16
-#define MAX_TYPEDEFS 32
+#define MAX_TYPEDEFS 64
 
 #define BC_PUSHI       1
 #define BC_PUSHS       2
@@ -72,8 +74,8 @@
 
 enum { T_EOF = 0, T_ID = 256, T_NUM, T_STRING, T_CHAR };
 enum { CTRL_LOOP = 1, CTRL_SWITCH = 2 };
-#define MAX_SWITCH_CASES 64
-#define MAX_ENUM_CONSTANTS 128
+#define MAX_SWITCH_CASES 128
+#define MAX_ENUM_CONSTANTS 256
 
 typedef struct {
     u8 op;
@@ -169,7 +171,11 @@ static Macro macros[MAX_MACROS];
 static int macro_count;
 static char typedef_names[MAX_TYPEDEFS][MAX_NAME + 1];
 static int typedef_count;
-static char preprocessed_source[MAX_SOURCE_BYTES];
+static char preprocessed_source[MAX_SOURCE_BYTES + 1];
+/* The compiler runs on a 16 KiB kernel stack. Keep full-source preprocessor
+ * scratch space in static storage, not in preprocess_source()'s stack frame. */
+static char preprocess_raw_line[MAX_SOURCE_BYTES + 1];
+static char preprocess_line_buffer[MAX_SOURCE_BYTES + 1];
 static EnumConstant enum_constants[MAX_ENUM_CONSTANTS];
 static int enum_constant_count;
 static int memory_top;
@@ -229,23 +235,23 @@ static int macro_find(const char *name) {
 static int macro_set(const char *name, const char *value, int line) {
     int index = macro_find(name);
     if (index < 0) {
-        if (macro_count >= MAX_MACROS) { set_error_at(line, 1, "macro table is full (maximum 48)"); return -1; }
+        if (macro_count >= MAX_MACROS) { set_error_at(line, 1, "macro table is full (maximum 96)"); return -1; }
         index = macro_count++;
     }
     int n = 0;
-    while (name[n] && n < MAX_NAME) { macros[index].name[n] = name[n]; ++n; }
-    if (name[n]) { set_error_at(line, 1, "macro name exceeds 31 characters"); return -1; }
+    while (n < MAX_NAME && name[n]) { macros[index].name[n] = name[n]; ++n; }
+    if (name[n]) { set_error_at(line, 1, "macro name exceeds 63 characters"); return -1; }
     macros[index].name[n] = 0;
     n = 0;
     while (value[n] && n < MAX_MACRO_VALUE - 1) { macros[index].value[n] = value[n]; ++n; }
-    if (value[n]) { set_error_at(line, 1, "macro replacement exceeds 127 characters"); return -1; }
+    if (value[n]) { set_error_at(line, 1, "macro replacement exceeds 255 characters"); return -1; }
     macros[index].value[n] = 0;
     return index;
 }
 
 static int pp_append(char *out, int *used, const char *text, int length, int line) {
-    if (length < 0 || *used + length >= MAX_SOURCE_BYTES) {
-        set_error_at(line, 1, "preprocessed source exceeds 8191 bytes");
+    if (length < 0 || *used + length > MAX_SOURCE_BYTES) {
+        set_error_at(line, 1, "preprocessed source exceeds 32767 bytes");
         return 0;
     }
     for (int i = 0; i < length; ++i) out[(*used)++] = text[i];
@@ -255,7 +261,7 @@ static int pp_append(char *out, int *used, const char *text, int length, int lin
 
 static int pp_expand_text(const char *input, char *out, int *used, int line,
                           int *in_block_comment, int depth) {
-    if (depth > 8) { set_error_at(line, 1, "recursive macro expansion detected"); return 0; }
+    if (depth > MAX_PP_DEPTH) { set_error_at(line, 1, "recursive macro expansion exceeds the configured depth"); return 0; }
     int i = 0;
     while (input[i] && !failed) {
         if (*in_block_comment) {
@@ -296,7 +302,7 @@ static int pp_expand_text(const char *input, char *out, int *used, int line,
         if (pp_identifier_start(input[i])) {
             int start = i++;
             while (pp_identifier_char(input[i])) ++i;
-            char name[MAX_NAME + 1];
+            char name[MAX_NAME + 1] = {0};
             int length = i - start;
             if (length > MAX_NAME) {
                 if (!pp_append(out, used, input + start, length, line)) return 0;
@@ -348,7 +354,7 @@ static void preprocess_source(const char *src) {
         int length = (int)(cursor - line);
         int had_newline = *cursor == '\n';
         if (had_newline) ++cursor;
-        char raw_line[MAX_SOURCE_BYTES];
+        char *raw_line = preprocess_raw_line;
         for (int i = 0; i < length; ++i) raw_line[i] = line[i];
         raw_line[length] = 0;
         int first = 0;
@@ -416,7 +422,7 @@ static void preprocess_source(const char *src) {
                 break;
             }
         } else if (active) {
-            char line_buffer[MAX_SOURCE_BYTES];
+            char *line_buffer = preprocess_line_buffer;
             int line_used = 0;
             line_buffer[0] = 0;
             if (!pp_expand_text(raw_line, line_buffer, &line_used, line_number, &in_block_comment, 0)) break;
@@ -599,8 +605,16 @@ static void next_token(void) {
             }
         }
         tok.text[n] = 0;
-        tok.length = n;
-        if (n > MAX_NAME) set_error("identifier is too long (maximum 31 characters)");
+        if (n > MAX_NAME) {
+            /* Keep every downstream fixed-size identifier copy bounded even
+             * after reporting the lexical error. Parsing may unwind through
+             * the current production before it observes `failed`. */
+            tok.text[MAX_NAME] = 0;
+            tok.length = MAX_NAME;
+            set_error("identifier is too long (maximum 63 characters)");
+        } else {
+            tok.length = n;
+        }
         tok.kind = T_ID;
         return;
     }
@@ -746,7 +760,7 @@ static void expect(const char *text) {
 static int emit(int op, i32 arg) {
     if (failed) return -1;
     if (code_count >= MAX_CODE) {
-        set_error("program is too large (AEX limit is 768 instructions)");
+        set_error("program is too large (AEX limit is 2048 instructions)");
         return -1;
     }
     code[code_count].op = (u8)op;
@@ -803,7 +817,7 @@ static int find_symbol(const char *name) {
 
 static int add_symbol(const char *name, int count, int is_array) {
     if (symbol_count >= MAX_SYMBOLS) {
-        set_error("too many variables (maximum 160 active declarations)");
+        set_error("too many variables (maximum 512 active declarations)");
         return -1;
     }
     for (int i = symbol_count - 1; i >= 0 && symbols[i].depth == scope_depth; i--) {
@@ -812,17 +826,17 @@ static int add_symbol(const char *name, int count, int is_array) {
             return -1;
         }
     }
-    if (count < 1 || count > 4096 - memory_top) {
-        set_error("too much variable storage (maximum 4096 cells)");
+    if (count < 1 || count > MAX_LOCAL_CELLS - memory_top) {
+        set_error("too much variable storage (maximum 8192 cells)");
         return -1;
     }
     int n = 0;
-    while (name[n] && n < MAX_NAME) {
+    while (n < MAX_NAME && name[n]) {
         symbols[symbol_count].name[n] = name[n];
         n++;
     }
     if (name[n]) {
-        set_error("identifier is too long (maximum 31 characters)");
+        set_error("identifier is too long (maximum 63 characters)");
         return -1;
     }
     symbols[symbol_count].name[n] = 0;
@@ -839,7 +853,7 @@ static int add_symbol(const char *name, int count, int is_array) {
 
 static int add_global_symbol(const char *name, int count, int is_array, int pointer_depth) {
     if (global_symbol_count >= MAX_GLOBALS) {
-        set_error("too many global declarations (maximum 64)");
+        set_error("too many global declarations (maximum 128)");
         return -1;
     }
     for (int i = 0; i < global_symbol_count; ++i) {
@@ -849,15 +863,15 @@ static int add_global_symbol(const char *name, int count, int is_array, int poin
         }
     }
     if (count < 1 || count > MAX_GLOBAL_CELLS - global_cell_count) {
-        set_error("global storage limit exceeded (maximum 256 cells)");
+        set_error("global storage limit exceeded (maximum 1024 cells)");
         return -1;
     }
     int n = 0;
-    while (name[n] && n < MAX_NAME) {
+    while (n < MAX_NAME && name[n]) {
         global_symbols[global_symbol_count].name[n] = name[n];
         ++n;
     }
-    if (name[n]) { set_error("identifier is too long (maximum 31 characters)"); return -1; }
+    if (name[n]) { set_error("identifier is too long (maximum 63 characters)"); return -1; }
     global_symbols[global_symbol_count].name[n] = 0;
     global_symbols[global_symbol_count].base = global_cell_count;
     global_symbols[global_symbol_count].count = count;
@@ -895,10 +909,10 @@ static int find_typedef(const char *name) {
 
 static void add_typedef_name(const char *name) {
     if (find_typedef(name) >= 0) { set_error("duplicate typedef name"); return; }
-    if (typedef_count >= MAX_TYPEDEFS) { set_error("typedef table is full (maximum 32)"); return; }
+    if (typedef_count >= MAX_TYPEDEFS) { set_error("typedef table is full (maximum 64)"); return; }
     int n = 0;
-    while (name[n] && n < MAX_NAME) { typedef_names[typedef_count][n] = name[n]; ++n; }
-    if (name[n]) { set_error("typedef name exceeds 31 characters"); return; }
+    while (n < MAX_NAME && name[n]) { typedef_names[typedef_count][n] = name[n]; ++n; }
+    if (name[n]) { set_error("typedef name exceeds 63 characters"); return; }
     typedef_names[typedef_count][n] = 0;
     ++typedef_count;
 }
@@ -908,7 +922,7 @@ static void parse_typedef_declaration(void) {
     if (parse_type(0) < 0) return;
     if (accept("*")) { set_error("pointer typedefs are not supported yet"); return; }
     if (tok.kind != T_ID) { set_error("typedef needs a name"); return; }
-    char name[MAX_NAME + 1];
+    char name[MAX_NAME + 1] = {0};
     for (int i = 0; i <= tok.length; ++i) name[i] = tok.text[i];
     next_token();
     if (streq(tok.text, "[")) { set_error("array typedefs are not supported yet"); return; }
@@ -931,20 +945,29 @@ static int find_enum_constant(const char *name) {
 }
 
 static int add_enum_constant(const char *name, i64 value) {
+    if (!name) {
+        set_error("enumerator name is missing");
+        return -1;
+    }
     if (find_enum_constant(name) >= 0) {
         set_error("duplicate enumerator name");
         return -1;
     }
     if (enum_constant_count >= MAX_ENUM_CONSTANTS) {
-        set_error("too many enum constants (maximum 128)");
+        set_error("too many enum constants (maximum 256)");
         return -1;
     }
-    EnumConstant *constant = &enum_constants[enum_constant_count++];
     int i = 0;
-    while (name[i] && i < MAX_NAME) { constant->name[i] = name[i]; i++; }
+    while (i < MAX_NAME && name[i]) ++i;
+    if (name[i]) {
+        set_error("enumerator name exceeds 63 characters");
+        return -1;
+    }
+    EnumConstant *constant = &enum_constants[enum_constant_count];
+    for (i = 0; i < MAX_NAME && name[i]; ++i) constant->name[i] = name[i];
     constant->name[i] = 0;
     constant->value = value;
-    return enum_constant_count - 1;
+    return enum_constant_count++;
 }
 
 static int parse_enum_constant_value(i64 *out) {
@@ -979,7 +1002,7 @@ static int parse_type(int allow_void) {
             if (!accept("}")) {
                 do {
                     if (tok.kind != T_ID) { set_error("expected enum constant name"); return -1; }
-                    char name[MAX_NAME + 1];
+                    char name[MAX_NAME + 1] = {0};
                     int n = tok.length;
                     for (int i = 0; i <= n; i++) name[i] = tok.text[i];
                     next_token();
@@ -1035,7 +1058,8 @@ static int builtin_id(const char *name) {
         "strchr", "strrchr", "strstr", "abs", "labs", "atoi",
         "isdigit", "isalpha", "isspace", "toupper", "tolower",
         "isalnum", "isupper", "islower", "isxdigit", "iscntrl",
-        "isprint", "isgraph", "ispunct"
+        "isprint", "isgraph", "ispunct", "strnlen", "strncat",
+        "strspn", "strcspn", "strpbrk", "rand", "srand"
     };
     for (int i = 1; i < (int)(sizeof(names) / sizeof(names[0])); ++i)
         if (streq(name, names[i])) return i;
@@ -1049,9 +1073,11 @@ static void validate_call(int id, int argc) {
              id == 17 || (id >= 18 && id <= 30)) valid = argc == 1;
     else if (id == 4) valid = argc >= 2;
     else if (id == 5) valid = argc == 0;
-    else if (id == 7 || id == 9 || id == 11 || id == 12 || id == 13 || id == 14)
-        valid = argc == 2;
-    else if (id == 8 || id == 10) valid = argc == 3;
+    else if (id == 7 || id == 9 || id == 11 || id == 12 || id == 13 || id == 14 ||
+             id == 31 || id == 33 || id == 34 || id == 35) valid = argc == 2;
+    else if (id == 8 || id == 10 || id == 32) valid = argc == 3;
+    else if (id == 36) valid = argc == 0;
+    else if (id == 37) valid = argc == 1;
     if (argc > 255) set_error("a function call may have at most 255 arguments");
     else if (id < 0 || !valid) set_error("unknown function or incorrect number of arguments");
 }
@@ -1085,12 +1111,12 @@ static int declare_function(const char *name, int return_type,
         return index;
     }
     if (function_count >= MAX_FUNCTIONS) {
-        set_error("too many functions (maximum 32)");
+        set_error("too many functions (maximum 96)");
         return -1;
     }
     index = function_count++;
     int n = 0;
-    while (name[n] && n < MAX_NAME) {
+    while (n < MAX_NAME && name[n]) {
         functions[index].name[n] = name[n];
         n++;
     }
@@ -1127,7 +1153,7 @@ static int parse_call(const char *name) {
         do {
             parse_expression();
             argc++;
-            if (argc > MAX_PARAMS) set_error("a function call may have at most 16 arguments");
+            if (argc > MAX_PARAMS) set_error("a function call may have at most 32 arguments");
         } while (accept(",") && !failed);
         expect(")");
     }
@@ -1182,7 +1208,7 @@ static int parse_lvalue_after_name(int symbol) {
 }
 
 static int allocate_temporary(void) {
-    if (memory_top >= 4096) {
+    if (memory_top >= MAX_LOCAL_CELLS) {
         set_error("too much temporary storage");
         return -1;
     }
@@ -1263,7 +1289,7 @@ static void parse_primary(void) {
         return;
     }
     if (tok.kind == T_ID) {
-        char name[MAX_NAME + 1];
+        char name[MAX_NAME + 1] = {0};
         int n = tok.length;
         for (int i = 0; i <= n; i++) name[i] = tok.text[i];
         next_token();
@@ -1294,7 +1320,7 @@ static void parse_primary(void) {
 
 static void parse_postfix(void) {
     if (tok.kind == T_ID) {
-        char name[MAX_NAME + 1];
+        char name[MAX_NAME + 1] = {0};
         int n = tok.length;
         for (int i = 0; i <= n; i++) name[i] = tok.text[i];
         next_token();
@@ -1340,7 +1366,7 @@ static void parse_unary(void) {
                 while (accept("*")) pointers++;
                 int count = 1;
                 if (accept("[")) {
-                    if (tok.kind != T_NUM || tok.value < 1 || tok.value > 4096) {
+                    if (tok.kind != T_NUM || tok.value < 1 || tok.value > MAX_ARRAY_CELLS) {
                         set_error("sizeof array bound must be a constant from 1 to 4096"); return;
                     }
                     count = (int)tok.value; next_token(); expect("]");
@@ -1351,7 +1377,7 @@ static void parse_unary(void) {
                 return;
             }
             if (tok.kind == T_ID) {
-                char name[MAX_NAME + 1]; int n = tok.length;
+                char name[MAX_NAME + 1] = {0}; int n = tok.length;
                 for (int i = 0; i <= n; i++) name[i] = tok.text[i];
                 next_token(); expect(")");
                 int constant = find_enum_constant(name);
@@ -1364,7 +1390,7 @@ static void parse_unary(void) {
             return;
         }
         if (tok.kind == T_ID) {
-            char name[MAX_NAME + 1]; int n = tok.length;
+            char name[MAX_NAME + 1] = {0}; int n = tok.length;
             for (int i = 0; i <= n; i++) name[i] = tok.text[i];
             next_token();
             int symbol = require_symbol(name);
@@ -1384,7 +1410,7 @@ static void parse_unary(void) {
             set_error("address operator requires a scalar variable");
             return;
         }
-        char name[MAX_NAME + 1];
+        char name[MAX_NAME + 1] = {0};
         int n = tok.length;
         for (int i = 0; i <= n; i++) name[i] = tok.text[i];
         next_token();
@@ -1404,7 +1430,7 @@ static void parse_unary(void) {
             set_error("increment/decrement requires a variable");
             return;
         }
-        char name[MAX_NAME + 1];
+        char name[MAX_NAME + 1] = {0};
         int n = tok.length;
         for (int i = 0; i <= n; i++) name[i] = tok.text[i];
         next_token();
@@ -1452,9 +1478,11 @@ static void parse_relational(void) {
     parse_shift();
     while (streq(tok.text, "<") || streq(tok.text, ">") ||
            streq(tok.text, "<=") || streq(tok.text, ">=")) {
-        char op[3];
+        char op[3] = {0};
         int n = tok.length;
-        for (int i = 0; i <= n && i < 3; i++) op[i] = tok.text[i];
+        if (n < 1 || n > 2) { set_error("invalid comparison operator"); return; }
+        for (int i = 0; i < n; ++i) op[i] = tok.text[i];
+        op[n] = 0;
         next_token();
         parse_shift();
         emit(streq(op, "<") ? BC_LT : streq(op, ">") ? BC_GT :
@@ -1577,7 +1605,7 @@ static void parse_declaration(int with_semicolon) {
             set_error("expected variable name after type");
             return;
         }
-        char name[MAX_NAME + 1];
+        char name[MAX_NAME + 1] = {0};
         int n = tok.length;
         for (int i = 0; i <= n; i++) name[i] = tok.text[i];
         next_token();
@@ -1590,7 +1618,7 @@ static void parse_declaration(int with_semicolon) {
                 set_error("array length must be an integer constant");
                 return;
             }
-            if (tok.value < 1 || tok.value > 4096) {
+            if (tok.value < 1 || tok.value > MAX_ARRAY_CELLS) {
                 set_error("array length must be between 1 and 4096");
                 return;
             }
@@ -1637,8 +1665,11 @@ static void parse_simple_statement(int with_semicolon) {
             set_error("dereferenced pointer statement must assign through the pointer");
             return;
         }
-        char op[4]; int len = tok.length;
-        for (int i = 0; i <= len && i < 4; i++) op[i] = tok.text[i];
+        char op[4] = {0};
+        int len = tok.length;
+        if (len < 1 || len > 3) { set_error("invalid assignment operator"); return; }
+        for (int i = 0; i < len; ++i) op[i] = tok.text[i];
+        op[len] = 0;
         next_token();
         if (!streq(op, "=")) {
             emit(BC_DUP, 0);
@@ -1651,7 +1682,7 @@ static void parse_simple_statement(int with_semicolon) {
         return;
     }
     if (tok.kind == T_ID) {
-        char name[MAX_NAME + 1];
+        char name[MAX_NAME + 1] = {0};
         int n = tok.length;
         for (int i = 0; i <= n; i++) name[i] = tok.text[i];
         next_token();
@@ -1668,9 +1699,11 @@ static void parse_simple_statement(int with_semicolon) {
         int kind = parse_lvalue_after_name(symbol);
 
         if (is_assignment_operator(tok.text)) {
-            char op[4];
+            char op[4] = {0};
             int len = tok.length;
-            for (int i = 0; i <= len && i < 4; i++) op[i] = tok.text[i];
+            if (len < 1 || len > 3) { set_error("invalid assignment operator"); return; }
+            for (int i = 0; i < len; ++i) op[i] = tok.text[i];
+            op[len] = 0;
             next_token();
             if (kind == 1 && !streq(op, "="))
                 emit(symbols[symbol].is_global ? BC_GLOAD : BC_LOAD, symbols[symbol].base);
@@ -1992,16 +2025,32 @@ static int global_const_unary(i64 *value) {
 static int global_const_mul(i64 *value) {
     if (!global_const_unary(value)) return 0;
     while (streq(tok.text, "*") || streq(tok.text, "/") || streq(tok.text, "%")) {
-        char op = tok.text[0]; next_token();
+        char op = tok.text[0];
+        next_token();
         i64 right;
         if (!global_const_unary(&right)) return 0;
-        if ((op == '/' || op == '%') && right == 0) { set_error("division by zero in global initializer"); return 0; }
-        if (op == '*') *value = (i64)((u64)*value * (u64)right);
-        else if (*value == (-9223372036854775807LL - 1LL) && right == -1) {
-            if (op == '/') *value = (-9223372036854775807LL - 1LL);
-            else *value = 0;
-        } else if (op == '/') *value /= right;
-        else *value %= right;
+
+        if (op == '*') {
+            *value = (i64)((u64)*value * (u64)right);
+        } else if (op == '/') {
+            if (right == 0) {
+                set_error("division by zero in global initializer");
+                return 0;
+            }
+            if (*value == (-9223372036854775807LL - 1LL) && right == -1)
+                *value = (-9223372036854775807LL - 1LL);
+            else
+                *value /= right;
+        } else { /* The loop admits only '*' '/' and '%'. */
+            if (right == 0) {
+                set_error("division by zero in global initializer");
+                return 0;
+            }
+            if (*value == (-9223372036854775807LL - 1LL) && right == -1)
+                *value = 0;
+            else
+                *value %= right;
+        }
     }
     return 1;
 }
@@ -2033,7 +2082,12 @@ static int global_const_shift(i64 *value) {
 static int global_const_rel(i64 *value) {
     if (!global_const_shift(value)) return 0;
     while (streq(tok.text, "<") || streq(tok.text, ">") || streq(tok.text, "<=") || streq(tok.text, ">=")) {
-        char op[3]; int n = tok.length; for (int i=0;i<=n;i++) op[i]=tok.text[i]; next_token();
+        char op[3] = {0};
+        int n = tok.length;
+        if (n < 1 || n > 2) { set_error("invalid comparison operator"); return 0; }
+        for (int i = 0; i < n; ++i) op[i] = tok.text[i];
+        op[n] = 0;
+        next_token();
         i64 right; if (!global_const_shift(&right)) return 0;
         *value = streq(op,"<") ? (*value < right) : streq(op,">") ? (*value > right) :
                  streq(op,"<=") ? (*value <= right) : (*value >= right);
@@ -2131,7 +2185,7 @@ static void parse_global_declaration(const char *first_name, int first_pointer_d
             if (++pointers > 2) { set_error("pointer nesting is limited to two levels"); return; }
         }
         if (tok.kind != T_ID) { set_error("expected global variable name"); return; }
-        char name[MAX_NAME + 1];
+        char name[MAX_NAME + 1] = {0};
         int n = tok.length;
         for (int i = 0; i <= n; ++i) name[i] = tok.text[i];
         next_token();
@@ -2233,8 +2287,8 @@ static void begin_function(int function_index, Parameter params[MAX_PARAMS], int
     if (functions[function_index].local_count < argc) {
         functions[function_index].local_count = argc;
     }
-    if (functions[function_index].local_count > 4096) {
-        set_error("function needs more than 4096 local storage cells");
+    if (functions[function_index].local_count > MAX_LOCAL_CELLS) {
+        set_error("function needs more than 8192 local storage cells");
     }
     patch(enter_instruction, functions[function_index].local_count);
 }
@@ -2276,7 +2330,7 @@ int c_compile(const char *src, char *image, usize cap) {
     usize source_length = 0;
     while (source_length <= MAX_SOURCE_BYTES && src[source_length]) ++source_length;
     if (source_length > MAX_SOURCE_BYTES) {
-        set_error("source exceeds the 8192-byte Aiden C source limit");
+        set_error("source exceeds the 32768-byte Aiden C source limit");
         return -1;
     }
     preprocess_source(src);
@@ -2305,7 +2359,7 @@ int c_compile(const char *src, char *image, usize cap) {
 
         if (accept(";")) continue; /* Standalone enum declaration. */
         if (tok.kind != T_ID) { set_error("expected a global or function name"); break; }
-        char declarator_name[MAX_NAME + 1];
+        char declarator_name[MAX_NAME + 1] = {0};
         int name_length = tok.length;
         for (int i = 0; i <= name_length; ++i) declarator_name[i] = tok.text[i];
         next_token();

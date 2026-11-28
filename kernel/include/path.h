@@ -3,8 +3,7 @@
 
 #include "types.h"
 
-/* A filesystem path is stored without a leading slash and is limited to 63
- * bytes because the current on-disk directory record has a 64-byte name. */
+/* DenFS v4 stores up to 255 bytes per path. Paths omit a leading slash. */
 int fs_name_valid(const char *name);
 int fs_path_valid(const char *path);
 int fs_path_normalize(const char *base, const char *input,

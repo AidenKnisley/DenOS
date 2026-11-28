@@ -15,6 +15,8 @@ const u8 *e1000_mac_address(void) { return test_mac; }
 u32 e1000_received_frames(void) { return 0; }
 u32 e1000_transmitted_frames(void) { return 0; }
 u64 timer_ticks(void) { return ticks++; }
+void serial_write(const char *s) { (void)s; }
+void serial_putc(char c) { (void)c; }
 static void be16(u8 *p,u16 v) { p[0]=(u8)(v>>8); p[1]=(u8)v; }
 static u16 sum(const u8 *p,u32 n) { u32 s=0; while(n>1){s+=((u16)p[0]<<8)|p[1];p+=2;n-=2;} if(n)s+=(u16)p[0]<<8; while(s>>16)s=(s&65535)+(s>>16); return (u16)~s; }
 #define CHECK(x) do { if(!(x)){fprintf(stderr,"FAIL %s:%d: %s\n",__FILE__,__LINE__,#x);exit(1);} } while(0)
@@ -39,6 +41,13 @@ int main(void) {
     net_receive_frame(frame,42);
     CHECK(sent_len==42); CHECK(sent[12]==0x08 && sent[13]==0x00);
     CHECK(sent[34]==0); CHECK(sum(sent+14,20)==0); CHECK(sum(sent+34,8)==0);
-    puts("Network protocol tests passed: ARP response, IPv4 validation, ICMP echo reply, checksums.");
+    /* An unresolved peer triggers an ARP request with zero THA, not all-FF. */
+    { const u8 unresolved[4] = {10, 0, 2, 77};
+      CHECK(net_ping(unresolved, 10u) < 0);
+      CHECK(sent_len == 42 && sent[12] == 0x08 && sent[13] == 0x06);
+      CHECK(sent[20] == 0 && sent[21] == 1);
+      for (u32 i = 0; i < 6; ++i) CHECK(sent[32 + i] == 0);
+    }
+    puts("Network protocol tests passed: ARP validation, zeroed ARP THA, IPv4 validation, ICMP checksums.");
     return 0;
 }

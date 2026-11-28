@@ -4,19 +4,18 @@
 #include "kstring.h"
 #include "path.h"
 
-/* DenFS v3 is still a small, fixed-slot filesystem, but is sized for a
- * local command-line system: 256 entries, files up to 64 KiB, and nested directories.
- * Mount migrates recognized v1 and v2 volumes into the expanded layout. */
+/* DenFS v4 keeps the fixed 64 KiB data slots and 256-entry table, while
+ * expanding every stored path to 255 bytes. Recognized v1/v2/v3 volumes migrate. */
 #define FILES 256
-#define NAME 64
+#define NAME 256
 #define DATA 65536
 #define SLOT_DATA_CAPACITY (DATA - 1u)
 #define SECTOR_SIZE 512u
-#define DIR_ENTRY_SIZE 72u
-#define DIR_SECTORS 36u
+#define DIR_ENTRY_SIZE 264u
+#define DIR_SECTORS 132u
 #define DATA_START_LBA (1u + DIR_SECTORS)
 #define SLOT_SECTORS (DATA / SECTOR_SIZE)
-#define FS_VERSION 3u
+#define FS_VERSION 4u
 #define DIR_BYTES (DIR_SECTORS * SECTOR_SIZE)
 #define FS_REQUIRED_SECTORS (DATA_START_LBA + (FILES * SLOT_SECTORS))
 
@@ -30,8 +29,14 @@
 #define V2_DIR_SECTORS 18u
 #define V2_DATA_START_LBA (1u + V2_DIR_SECTORS)
 #define V2_SLOT_SECTORS (V2_DATA / SECTOR_SIZE)
+#define V3_FILES 256u
+#define V3_DATA 65536u
+#define V3_DIR_SECTORS 36u
+#define V3_DATA_START_LBA (1u + V3_DIR_SECTORS)
+#define V3_SLOT_SECTORS (V3_DATA / SECTOR_SIZE)
 #define LEGACY_DIR_ENTRY_SIZE 72u
-#define LEGACY_DIR_BYTES (V2_DIR_SECTORS * SECTOR_SIZE)
+#define LEGACY_NAME_CAPACITY 64u
+#define LEGACY_DIR_BYTES (V3_DIR_SECTORS * SECTOR_SIZE)
 
 static struct {
     char name[NAME];
@@ -67,7 +72,7 @@ const char *fs_last_error_message(void) {
         case FS_ERROR_NONE: return "no error";
         case FS_ERROR_INVALID_ARGUMENT: return "a required path or data pointer was missing";
         case FS_ERROR_INVALID_NAME: return "invalid path; use normal folder names without empty, dot, parent, control, or device-separator components";
-        case FS_ERROR_NAME_TOO_LONG: return "path is longer than 63 characters";
+        case FS_ERROR_NAME_TOO_LONG: return "path is longer than 255 characters";
         case FS_ERROR_DATA_TOO_LARGE: return "file contents exceed the 65535-byte limit";
         case FS_ERROR_NOT_FOUND: return "file or directory does not exist";
         case FS_ERROR_NO_SPACE: return "the filesystem has no free directory slots";
@@ -76,6 +81,7 @@ const char *fs_last_error_message(void) {
         case FS_ERROR_ALREADY_EXISTS: return "an entry with that path already exists";
         case FS_ERROR_NOT_DIRECTORY: return "a parent path component is not a directory";
         case FS_ERROR_DIRECTORY_NOT_EMPTY: return "directory is not empty; remove its contents first";
+        case FS_ERROR_IS_DIRECTORY: return "path refers to a directory, not a file";
         default: return "unknown filesystem error";
     }
 }
@@ -160,6 +166,8 @@ static int old_superblock_version(const u8 *sector) {
         read_u32(sector + 12) == V1_FILES && read_u32(sector + 16) == V1_DATA) return 1;
     if (read_u32(sector + 8) == 2u &&
         read_u32(sector + 12) == V2_FILES && read_u32(sector + 16) == V2_DATA) return 2;
+    if (read_u32(sector + 8) == 3u &&
+        read_u32(sector + 12) == V3_FILES && read_u32(sector + 16) == V3_DATA) return 3;
     return 0;
 }
 
@@ -187,7 +195,7 @@ static int load_file(int slot, u32 size) {
 static int persist_entry(int slot);
 
 static int read_old_directory(u32 directory_sectors) {
-    if (directory_sectors > V2_DIR_SECTORS) return -1;
+    if (directory_sectors > V3_DIR_SECTORS) return -1;
     for (u32 sector = 0; sector < directory_sectors; sector++)
         if (ata_read_sector(1u + sector, legacy_directory + sector * SECTOR_SIZE) < 0) return -1;
     return 0;
@@ -203,9 +211,10 @@ static int migrate_old_disk(u32 old_files, u32 old_data, u32 old_dir_sectors,
         int valid_name = 0;
         if (type != 1u && type != 2u) continue;
         if ((type == 1u && size >= old_data) || (type == 2u && size != 0)) continue;
-        for (u32 i = 0; i < NAME; i++) {
+        files[slot].name[0] = 0;
+        for (u32 i = 0; i < LEGACY_NAME_CAPACITY; i++) {
             files[slot].name[i] = (char)legacy_directory[off + 5u + i];
-            if (!files[slot].name[i]) valid_name = 1;
+            if (!files[slot].name[i]) { valid_name = 1; break; }
         }
         if (!valid_name || !fs_path_valid(files[slot].name)) continue;
         files[slot].used = 1;
@@ -246,7 +255,7 @@ static int mount_disk(void) {
     disk_ready = 0;
     if (ata_init() < 0) { storage_status = ata_diagnostic(); return -1; }
     if (ata_sector_count() < FS_REQUIRED_SECTORS) {
-        storage_status = "RAM fallback: ATA disk is too small for DenFS v3"; return -1;
+        storage_status = "RAM fallback: ATA disk is too small for DenFS v4"; return -1;
     }
     if (ata_read_sector(0, sector_buffer) < 0) {
         storage_status = "RAM fallback: ATA read error"; return -1;
@@ -258,11 +267,11 @@ static int mount_disk(void) {
         disk_ready = 1;
         if (read_directory() < 0) { disk_ready = 0; storage_status = "RAM fallback: could not read ATA directory"; return -1; }
     } else if ((old_version = old_superblock_version(sector_buffer)) != 0) {
-        u32 old_files = old_version == 1 ? V1_FILES : V2_FILES;
-        u32 old_data = old_version == 1 ? V1_DATA : V2_DATA;
-        u32 old_dir_sectors = old_version == 1 ? V1_DIR_SECTORS : V2_DIR_SECTORS;
-        u32 old_data_start = old_version == 1 ? V1_DATA_START_LBA : V2_DATA_START_LBA;
-        u32 old_slot_sectors = old_version == 1 ? V1_SLOT_SECTORS : V2_SLOT_SECTORS;
+        u32 old_files = old_version == 1 ? V1_FILES : (old_version == 2 ? V2_FILES : V3_FILES);
+        u32 old_data = old_version == 1 ? V1_DATA : (old_version == 2 ? V2_DATA : V3_DATA);
+        u32 old_dir_sectors = old_version == 1 ? V1_DIR_SECTORS : (old_version == 2 ? V2_DIR_SECTORS : V3_DIR_SECTORS);
+        u32 old_data_start = old_version == 1 ? V1_DATA_START_LBA : (old_version == 2 ? V2_DATA_START_LBA : V3_DATA_START_LBA);
+        u32 old_slot_sectors = old_version == 1 ? V1_SLOT_SECTORS : (old_version == 2 ? V2_SLOT_SECTORS : V3_SLOT_SECTORS);
         disk_ready = 1;
         if (migrate_old_disk(old_files, old_data, old_dir_sectors,
                              old_data_start, old_slot_sectors) < 0) {
@@ -357,7 +366,7 @@ static int persist_entry(int slot) {
     directory[off] = files[slot].is_directory ? FS_ENTRY_DIRECTORY : FS_ENTRY_FILE;
     write_u32(directory + off + 1, size);
     for (u32 i = 0; i < NAME; i++) directory[off + 5 + i] = (u8)files[slot].name[i];
-    for (u32 i = 69; i < DIR_ENTRY_SIZE; i++) directory[off + i] = 0;
+    for (u32 i = 5u + NAME; i < DIR_ENTRY_SIZE; i++) directory[off + i] = 0;
     if (write_directory() < 0)
         return storage_io_failed("Storage fault: ATA directory write failed; disk disabled");
     return 0;
@@ -402,7 +411,7 @@ int fs_write(const char *path, const char *data) {
     usize data_len = string_length(data, DATA);
     if (data_len >= DATA) { set_fs_error(FS_ERROR_DATA_TOO_LARGE); return -1; }
     int slot = find_slot(path);
-    if (slot >= 0 && files[slot].is_directory) { set_fs_error(FS_ERROR_INVALID_ARGUMENT); return -1; }
+    if (slot >= 0 && files[slot].is_directory) { set_fs_error(FS_ERROR_IS_DIRECTORY); return -1; }
     if (slot < 0) {
         for (int i = 0; i < FILES; i++) if (!files[i].used) { slot = i; break; }
     }
@@ -425,7 +434,7 @@ const char *fs_read(const char *path) {
     if (!fs_path_valid(path)) { set_fs_error(FS_ERROR_INVALID_NAME); return NULL; }
     int slot = find_slot(path);
     if (slot < 0) { set_fs_error(FS_ERROR_NOT_FOUND); return NULL; }
-    if (files[slot].is_directory) { set_fs_error(FS_ERROR_INVALID_ARGUMENT); return NULL; }
+    if (files[slot].is_directory) { set_fs_error(FS_ERROR_IS_DIRECTORY); return NULL; }
     set_fs_error(FS_ERROR_NONE); return files[slot].data;
 }
 
@@ -502,27 +511,96 @@ int fs_move(const char *source, const char *destination) {
     return 0;
 }
 
-int fs_touch(const char *path) {
+int fs_rename(const char *source, const char *destination) {
+    return fs_move(source, destination);
+}
+
+int fs_exists(const char *path) {
+    if (!path || !fs_path_valid(path)) return 0;
+    return find_slot(path) >= 0;
+}
+
+int fs_is_file(const char *path) {
+    if (!path || !fs_path_valid(path)) return 0;
+    int slot = find_slot(path);
+    return slot >= 0 && !files[slot].is_directory;
+}
+
+int fs_mkdir_p(const char *path) {
+    char current[NAME];
+    usize length;
     if (!path) { set_fs_error(FS_ERROR_INVALID_ARGUMENT); return -1; }
-    if (find_slot(path) >= 0) { set_fs_error(FS_ERROR_NONE); return 0; }
+    length = kstrnlen(path, NAME);
+    if (length >= NAME) { set_fs_error(FS_ERROR_NAME_TOO_LONG); return -1; }
+    if (!length) { set_fs_error(FS_ERROR_NONE); return 0; }
+    if (!fs_path_valid(path)) { set_fs_error(FS_ERROR_INVALID_NAME); return -1; }
+    string_copy(current, path, sizeof(current));
+    for (usize i = 0; i <= length; ++i) {
+        char separator;
+        int slot;
+        if (current[i] != '/' && current[i] != '\0') continue;
+        separator = current[i];
+        current[i] = '\0';
+        slot = find_slot(current);
+        if (slot >= 0) {
+            if (!files[slot].is_directory) {
+                set_fs_error(FS_ERROR_NOT_DIRECTORY);
+                return -1;
+            }
+        } else if (fs_mkdir(current) < 0) {
+            return -1;
+        }
+        current[i] = separator;
+    }
+    set_fs_error(FS_ERROR_NONE);
+    return 0;
+}
+
+int fs_touch(const char *path) {
+    int slot;
+    if (!path) { set_fs_error(FS_ERROR_INVALID_ARGUMENT); return -1; }
+    if (kstrnlen(path, NAME) >= NAME) { set_fs_error(FS_ERROR_NAME_TOO_LONG); return -1; }
+    if (!fs_path_valid(path)) { set_fs_error(FS_ERROR_INVALID_NAME); return -1; }
+    slot = find_slot(path);
+    if (slot >= 0) {
+        if (files[slot].is_directory) { set_fs_error(FS_ERROR_IS_DIRECTORY); return -1; }
+        set_fs_error(FS_ERROR_NONE);
+        return 0;
+    }
     return fs_write(path, "");
 }
 
 void fs_seed_user_tree(void) {
     static const char *const directories[] = {
-        "home", "home/user", "home/user/Documents", "home/user/Downloads",
-        "home/user/bin", "home/user/tmp", "var", "var/log", "etc"
+        "home", "home/user", "home/user/documents", "home/user/downloads",
+        "home/user/projects", "home/user/examples", "home/user/utilities",
+        "home/user/pictures", "home/user/music", "home/user/videos",
+        "home/user/screenshots", "home/user/games", "home/user/bin",
+        "home/user/tmp", "bin", "sbin", "var", "var/log", "etc", "etc/denos"
     };
     for (usize i = 0; i < sizeof(directories) / sizeof(directories[0]); i++)
         if (!fs_is_directory(directories[i])) (void)fs_mkdir(directories[i]);
-    if (!fs_read("home/user/Documents/Welcome to DenOS.txt"))
-        (void)fs_write("home/user/Documents/Welcome to DenOS.txt",
-            "Welcome to DenOS 0.4.9\n\n"
-            "DenOS is an experimental 64-bit command-line operating system.\n"
-            "Use help to list commands, sysinfo to inspect the kernel, and bootlog\n"
-            "to review startup diagnostics. Your personal files live under /home/user.\n"
-            "The shell includes a text editor, local filesystem tools, service control,\n"
-            "network diagnostics, SHA-256 and CRC32 file checksums.\n");
+    if (!fs_read("home/user/documents/welcome.md"))
+        (void)fs_write("home/user/documents/welcome.md",
+            "# Welcome to DenOS\n\n"
+            "DenOS is an experimental 64-bit terminal-first operating system.\n\n"
+            "Use `help` for commands, `apps` for native terminal apps, `monitor` for\n"
+            "live system statistics, and `arcade` for the built-in text games.\n\n"
+            "Your home folder contains documents, downloads, projects, examples,\n"
+            "utilities, games, pictures, music, videos, screenshots, bin, and tmp.\n\n"
+            "Bundled Aiden C examples live in examples/, games/, and utilities/.\n"
+            "Compile one with `cc examples/hello.c -o hello`, then `run hello`.\n\n"
+            "Aiden C compiles its supported C subset to AEX bytecode. Use `cc` to\n"
+            "compile a source file and `run` to execute a trusted AEX program.\n");
+    if (!fs_read("home/user/projects/hello.c"))
+        (void)fs_write("home/user/projects/hello.c",
+            "#include <stdio.h>\n\n"
+            "int main(void) {\n"
+            "    printf(\"Hello from Aiden C!\\n\");\n"
+            "    return 0;\n"
+            "}\n");
+    if (!fs_read("home/user/documents/quick-notes.md"))
+        (void)fs_write("home/user/documents/quick-notes.md", "# Quick notes\n\nStart writing here.\n");
 }
 
 void fs_list(void) {

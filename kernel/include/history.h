@@ -2,7 +2,7 @@
 #define DENOS_HISTORY_H
 #include "types.h"
 #define HISTORY_CAP 24u
-#define HISTORY_LINE_CAP 96u
+#define HISTORY_LINE_CAP 512u
 void history_init(void);
 int history_add(const char *line);
 usize history_count(void);

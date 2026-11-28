@@ -3,12 +3,12 @@
 #include "fs.h"
 #include "types.h"
 
-#define VM_CODE_MAX 768
-#define VM_STR_MAX 2048
-#define VM_STACK_MAX 2048
-#define VM_MEM_MAX 4096
-#define VM_GLOBAL_MAX 256
-#define VM_CALL_MAX 64
+#define VM_CODE_MAX 2048
+#define VM_STR_MAX 8192
+#define VM_STACK_MAX 4096
+#define VM_MEM_MAX 8192
+#define VM_GLOBAL_MAX 1024
+#define VM_CALL_MAX 128
 /* AEX images are ASCII hex: magic + count header + 5 bytes/instruction + data. */
 #define VM_IMAGE_TEXT_MAX (20u + VM_CODE_MAX * 10u + VM_STR_MAX * 2u)
 #ifndef VM_INSTRUCTION_BUDGET
@@ -42,6 +42,7 @@ static int vm_memory_top;
 static int vm_call_depth;
 static int vm_root_entered;
 static VMCallFrame vm_calls[VM_CALL_MAX];
+static u32 vm_random_state = 0x6d2b79f5u;
 
 static int hex_value(char c) {
     if(c>='0'&&c<='9')return c-'0';
@@ -257,6 +258,24 @@ static int builtin_scanf(int base,int argc) {
     }
     return converted;
 }
+static int vm_string_contains(i64 set, u8 wanted) {
+    for (int i = 0; i < VM_MEM_MAX; ++i) {
+        u8 value;
+        if (vm_read_char(set, i, &value) < 0 || value == 0) return 0;
+        if (value == wanted) return 1;
+    }
+    return 0;
+}
+
+static u32 vm_random_next(void) {
+    u32 value = vm_random_state;
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    vm_random_state = value ? value : 0x6d2b79f5u;
+    return vm_random_state >> 1;
+}
+
 static i64 builtin_extended(int id, int base, int argc) {
     i64 a = vm_stack[base];
     i64 b = argc > 1 ? vm_stack[base + 1] : 0;
@@ -364,6 +383,50 @@ static i64 builtin_extended(int id, int base, int argc) {
         case 29: return a >= 33 && a <= 126;
         case 30: return (a >= 33 && a <= 126) &&
                         !((a >= '0' && a <= '9') || (a >= 'A' && a <= 'Z') || (a >= 'a' && a <= 'z'));
+        case 31:
+            if (b < 0) { vm_error("negative length passed to strnlen"); return 0; }
+            if (b > VM_MEM_MAX) b = VM_MEM_MAX;
+            for (n = 0; n < (int)b; ++n) {
+                if (vm_read_char(a, n, &ch) < 0) { vm_error("invalid string in strnlen"); return 0; }
+                if (!ch) break;
+            }
+            return n;
+        case 32:
+            if (c < 0) { vm_error("negative length passed to strncat"); return 0; }
+            if (c > VM_MEM_MAX) c = VM_MEM_MAX;
+            if (vm_string_length(a, &n) < 0) { vm_error("invalid destination string in strncat"); return 0; }
+            for (m = 0; m < (int)c; ++m) {
+                if (vm_read_char(b, m, &ch) < 0) { vm_error("invalid source string in strncat"); return 0; }
+                if (!ch) break;
+                if (vm_write_char(a, n + m, ch) < 0) { vm_error("destination is too small in strncat"); return 0; }
+            }
+            if (vm_write_char(a, n + m, 0) < 0) { vm_error("destination is too small in strncat"); return 0; }
+            return a;
+        case 33:
+        case 34:
+        case 35: {
+            int left_length = 0;
+            if (vm_string_length(a, &left_length) < 0) { vm_error("invalid first string in span/search function"); return 0; }
+            if (id == 35) {
+                for (n = 0; n < left_length; ++n) {
+                    if (vm_read_char(a, n, &ch) < 0) break;
+                    if (vm_string_contains(b, ch)) return a + n;
+                }
+                return 0;
+            }
+            for (n = 0; n < left_length; ++n) {
+                if (vm_read_char(a, n, &ch) < 0) { vm_error("invalid first string in span function"); return 0; }
+                int contained = vm_string_contains(b, ch);
+                if ((id == 33 && !contained) || (id == 34 && contained)) break;
+            }
+            return n;
+        }
+        case 36:
+            return (i64)vm_random_next();
+        case 37:
+            vm_random_state = (u32)a;
+            if (!vm_random_state) vm_random_state = 0x6d2b79f5u;
+            return 0;
         default: (void)m; return 0;
     }
 }
@@ -371,15 +434,17 @@ static i64 builtin_extended(int id, int base, int argc) {
 static i64 call_builtin(int encoded) {
     int id=(encoded>>16)&0xffff,argc=encoded&0xffff,base=vm_sp-argc;
     if (vm_fault) return 0;
-    if(argc<0 || argc>VM_STACK_MAX || base<0 || id<1 || id>30){
+    if(argc<0 || argc>VM_STACK_MAX || base<0 || id<1 || id>37){
         serial_write("AEX: invalid built-in call\n"); vm_fault=1; return 0;
     }
     if ((id==2 || id==3 || id==6 || id==15 || id==16 || id==17 || (id>=18 && id<=30)) && argc!=1) { vm_error("wrong built-in argument count"); return 0; }
     if (id==4 && argc<2) { vm_error("wrong scanf argument count"); return 0; }
     if (id==5 && argc!=0) { vm_error("wrong getchar argument count"); return 0; }
     if (id==1 && argc<1) { vm_error("wrong printf argument count"); return 0; }
-    if ((id==7 || id==9 || id==11 || id==12 || id==13 || id==14) && argc!=2) { vm_error("wrong string built-in argument count"); return 0; }
-    if ((id==8 || id==10) && argc!=3) { vm_error("wrong string built-in argument count"); return 0; }
+    if ((id==7 || id==9 || id==11 || id==12 || id==13 || id==14 || id==31 || id==33 || id==34 || id==35) && argc!=2) { vm_error("wrong string built-in argument count"); return 0; }
+    if ((id==8 || id==10 || id==32) && argc!=3) { vm_error("wrong string built-in argument count"); return 0; }
+    if (id==36 && argc!=0) { vm_error("wrong rand argument count"); return 0; }
+    if (id==37 && argc!=1) { vm_error("wrong srand argument count"); return 0; }
     i64 result=0;
     if(id==1)result=builtin_printf(base,argc);
     else if(id==2){vm_print_string(vm_stack[base]);if(!vm_fault)serial_putc('\n');}
@@ -454,7 +519,7 @@ int c_execute(const char *image) {
         }
         if (op==25) {
             int id=(arg>>16)&0xffff, argc=arg&0xffff;
-            if (id<1 || id>30 || argc>VM_STACK_MAX) {
+            if (id<1 || id>37 || argc>VM_STACK_MAX) {
                 serial_write("exec: invalid built-in instruction\n"); return -1;
             }
         }
@@ -702,7 +767,7 @@ int c_execute(const char *image) {
     return exit_code;
 }
 int program_run(const char *name) {
-    char path[64];
+    char path[FS_PATH_CAPACITY];
     usize i = 0;
     if (!name || !name[0]) {
         serial_write("exec: missing program name\n");

@@ -15,7 +15,7 @@ int fs_name_valid(const char *name) {
         unsigned char c = (unsigned char)name[length];
         if (c < 33 || c > 126 || c == '/' || c == '\\' || c == ':') return 0;
         length++;
-        if (length >= 64) return 0;
+        if (length >= 256) return 0;
     }
     if ((length == 1 && name[0] == '.') ||
         (length == 2 && name[0] == '.' && name[1] == '.')) return 0;
@@ -25,8 +25,8 @@ int fs_name_valid(const char *name) {
 int fs_path_valid(const char *path) {
     usize length, component = 0;
     if (!path) return 0;
-    length = path_length(path, 64);
-    if (length == 0 || length >= 64 || path[0] == '/' || path[length - 1] == '/') return 0;
+    length = path_length(path, 256);
+    if (length == 0 || length >= 256 || path[0] == '/' || path[length - 1] == '/') return 0;
     for (usize i = 0; i <= length; i++) {
         unsigned char c = (unsigned char)path[i];
         if (c == '/' || c == 0) {
@@ -101,7 +101,7 @@ int fs_path_normalize(const char *base, const char *input,
 int fs_path_parent(const char *path, char *output, usize capacity) {
     usize length;
     if (!path || !output || capacity == 0 || !fs_path_valid(path)) return -1;
-    length = path_length(path, 64);
+    length = path_length(path, 256);
     while (length && path[length - 1] != '/') length--;
     if (length) length--;
     if (length + 1 > capacity) return -1;

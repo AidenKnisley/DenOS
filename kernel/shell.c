@@ -37,6 +37,7 @@
 #include "ata.h"
 #include "elf64.h"
 #include "cvm.h"
+#include "terminal_apps.h"
 
 void editor_open(const char *name);
 
@@ -82,7 +83,8 @@ static void help(void) {
     puts("FILES & DIRECTORIES\n");
     puts("  ls [PATH]       List files             cd PATH        Change directory\n");
     puts("  pwd             Show current path      mkdir PATH     Create directory\n");
-    puts("  rmdir PATH      Remove empty folder    touch FILE     Create empty file\n");
+    puts("  mkdir -p PATH   Create parent folders  rmdir PATH     Remove empty folder\n");
+    puts("  touch FILE      Create empty file\n");
     puts("  cat FILE        Print a file           edit FILE      Edit a text file\n");
     puts("  write F TEXT    Write a text file       cp SRC DST     Copy a file\n");
     puts("  mv SRC DST      Move/rename             rm FILE        Delete a file\n\n");
@@ -96,11 +98,13 @@ static void help(void) {
     puts("  df  diskinfo  partitions  mounts  bootlog  hash FILE\n");
     puts("  sha256 FILE  crc32 FILE  services  service start|stop NAME\n\n");
     puts("NETWORK & KERNEL SERVICES\n");
-    puts("  net  ping IPv4  ipc  events  bootargs  uuid  random\n\n");
+    puts("  net  dhcp  dns HOST  ping HOST  web URL  ipc  events  uuid  random\n\n");
     puts("SHELL & UTILITIES\n");
     puts("  history  !!  env  set KEY VALUE  unset KEY  echo TEXT\n");
     puts("  grep PATTERN FILE  wc FILE  head/tail [-n COUNT] FILE  stat FILE\n");
-    puts("  hexdump FILE  tree [PATH]  (bounded text/file inspection)\n");
+    puts("  hexdump FILE  tree [PATH]  find [PATH] PATTERN  du [PATH]\n");
+    puts("  which PROGRAM  Search built-ins and Aiden C programs on PATH\n");
+    puts("  apps  browse [PATH]  calc [EXPR]  notes [FILE]  monitor  arcade\n");
     puts("  whoami  hostname  uname  ver  about  clear  beep  reboot  halt\n\n");
     puts("HELP TOPICS\n");
     puts("  help files | programming | graphics | system | network | shell | editor\n");
@@ -114,6 +118,7 @@ static void help_topic(const char *topic) {
         puts("  cd PATH        Change directory; cd .. moves up\n");
         puts("  pwd            Show the current directory\n");
         puts("  mkdir PATH     Create a directory\n");
+        puts("  mkdir -p PATH  Create missing parent directories too\n");
         puts("  rmdir PATH     Remove an empty directory\n");
         puts("  touch FILE     Create an empty file\n");
         puts("  cat FILE       Print a text file\n");
@@ -121,7 +126,10 @@ static void help_topic(const char *topic) {
         puts("  write FILE TEXT  Replace a file with TEXT\n");
         puts("  cp SRC DEST    Copy a file\n");
         puts("  mv SRC DEST    Move or rename a file\n");
-        puts("  rm FILE        Delete a file\n\n");
+        puts("  rm FILE        Delete a file\n");
+        puts("  find [PATH] PATTERN  Search names recursively (up to six levels); supports * and ?\n");
+        puts("  du [PATH]           Total text-file sizes under a path\n\n");
+        puts("Paths and file names may be up to 255 characters; spaces are allowed.\n");
         puts("Quote names with spaces: edit \"My Notes.txt\"\n");
         return;
     }
@@ -136,8 +144,9 @@ static void help_topic(const char *topic) {
         puts("if/else, while, do/while, for, switch/case/default, break and continue.\n");
         puts("Also: enums, scalar typedefs, sizeof(type/object), ++/--, ?: and compound ops.\n");
         puts("Preprocessor: object macros, #undef, #if 0/1, #ifdef/#ifndef, #else/#endif.\n");
-        puts("Strings: strlen, strcmp, strncmp, strcpy, strncpy, strcat, strchr, strstr.\n");
-        puts("More: atoi, abs/labs, ASCII ctype, printf integer formats, scanf.\n");
+        puts("Strings: strlen/strnlen, strcmp/strncmp, strcpy/strncpy, strcat/strncat.\n");
+        puts("Search: strchr, strrchr, strstr, strpbrk, strspn, strcspn.\n");
+        puts("More: atoi, abs/labs, ASCII ctype, printf integer formats, scanf, rand/srand.\n");
         puts("All scalar types use signed 64-bit VM cells; pointer/index checks are bounded.\n");
         puts("Limits: no structs/unions, floats, function-like macros or real headers.\n");
         puts("Not ISO C; output is AEX bytecode, not native x86-64. Runs in kernel context.\n");
@@ -145,15 +154,12 @@ static void help_topic(const char *topic) {
         return;
     }
     if (eq(topic, "graphics") || eq(topic, "gfx")) {
-        puts("KERNEL GRAPHICS LIBRARY\n\n");
-        puts("  Source: kernel/drivers/graphics.c\n");
-        puts("  Header: kernel/include/gfx.h\n");
-        puts("  Drawing: pixels, RGB/RGBA images, scaling, gradients, ellipses,\n");
-        puts("           rounded rectangles, triangles, clipped polygons.\n");
-        puts("  Text: anti-aliased UI font, centered text, word-wrapped text.\n");
-        puts("  Input: PS/2 mouse helpers and a bounded event queue.\n\n");
-        puts("The library is compiled and tested but is not started by CLI boot.\n");
-        puts("It is kernel API code, not a userspace graphics ABI. See docs/GRAPHICS.md.\n");
+        puts("GRAPHICS STATUS\n\n");
+        puts("DenOS is terminal-only: boot never switches to a framebuffer desktop.\n");
+        puts("The low-level renderer remains available for kernel graphics development,\n");
+        puts("but it is not initialized by normal boot and has no desktop/window manager.\n");
+        puts("Arcade games draw in the text console using colored ASCII characters.\n");
+        puts("See docs/GRAPHICS.md for the inactive low-level renderer API.\n");
         return;
     }
     if (eq(topic, "system")) {
@@ -165,6 +171,7 @@ static void help_topic(const char *topic) {
         puts("  tasks / services        Cooperative kernel task and service state\n");
         puts("  service start|stop NAME Manage a registered service\n");
         puts("  devices / bootlog       Hardware registry and boot diagnostics\n");
+        puts("  monitor                 Live text-mode heap/page/storage monitor\n");
         puts("  df / diskinfo           Filesystem and disk capacity\n");
         puts("  partitions              Inspect primary MBR partition entries\n");
         puts("  mounts                  List VFS mounts\n");
@@ -173,10 +180,22 @@ static void help_topic(const char *topic) {
     }
     if (eq(topic, "network") || eq(topic, "net")) {
         puts("NETWORKING\n\n");
-        puts("  net                     Show E1000 link, MAC, IPv4 and counters\n");
-        puts("  ping 10.0.2.2           Send ICMP echo via QEMU user networking\n\n");
-        puts("Current support is an experimental E1000 + ARP + IPv4 + ICMP profile.\n");
-        puts("DHCP, DNS, TCP/UDP sockets, IPv6, Wi-Fi, and routing are not implemented.\n");
+        puts("  net                     Show adapter, IPv4, mask, gateway, DNS and counters\n");
+        puts("  dhcp                    Request an IPv4 lease, gateway and DNS settings\n");
+        puts("  dns HOST                Resolve a hostname to IPv4\n");
+        puts("  ping HOST               Send ICMP echo to an IPv4 address or DNS hostname\n");
+        puts("  web https://HOST/PATH   Read an HTTP or verified HTTPS web page\n");
+        puts("                           PgUp/PgDn scroll; L links; 1-9 open; G URL\n");
+        puts("                           B/F history; I images; Q exits\n\n");
+        puts("The terminal browser formats common HTML blocks/tables, follows\n");
+        puts("relative and absolute links, keeps history, and supports simple CSS\n");
+        puts("visibility rules plus literal document.write strings. It is not a\n");
+        puts("full JavaScript browser. I supports non-interlaced 8-bit PNG, QOI,\n");
+        puts("and uncompressed 24/32-bit BMP images.\n");
+        puts("HTTPS is included in the normal build (BearSSL TLS 1.2, verified\n");
+        puts("certificates, hardware RDRAND and a correct UTC RTC clock). TLS 1.3\n");
+        puts("and certificate revocation checks, IPv6, Wi-Fi, concurrent sockets\n");
+        puts("and TCP server mode are not implemented. Use 'dhcp' off-QEMU.\n");
         return;
     }
     if (eq(topic, "editor") || eq(topic, "vim")) {
@@ -202,6 +221,7 @@ static void help_topic(const char *topic) {
         puts("  unset KEY               Remove a shell variable\n");
         puts("  $NAME                   Expand an environment variable in a command\n");
         puts("  uuid / random / beep    Small system utilities\n");
+        puts("  which PROGRAM          Find a built-in or Aiden C program on PATH\n");
         puts("  reboot / halt           Restart or stop the virtual machine\n");
         return;
     }
@@ -360,7 +380,7 @@ static void command_hash(const char *filename) {
         puts("hash: cannot read file (check the name and filesystem)\n");
         return;
     }
-    usize length = kstrnlen(contents, 16384u);
+    usize length = kstrnlen(contents, FS_FILE_MAX_BYTES);
     char hash[16];
     ksnprintf(hash, sizeof(hash), "%08x", kfnv1a32(contents, length));
     puts("FNV-1a 32: ");
@@ -429,6 +449,73 @@ static int default_aex_path(const char *source, char output[FS_PATH_CAPACITY]) {
     return ensure_aex_extension(output);
 }
 
+static int shell_has_path_separator(const char *name) {
+    if (!name) return 0;
+    for (usize i = 0; name[i]; ++i) if (name[i] == '/') return 1;
+    return 0;
+}
+
+static int shell_try_program(const char *candidate,
+                             char output[FS_PATH_CAPACITY]) {
+    if (shell_resolve(candidate, output) < 0 || ensure_aex_extension(output) < 0)
+        return -1;
+    return fs_is_file(output) ? 0 : -1;
+}
+
+/* Resolve an AEX program from an explicit path, the working directory, then PATH. */
+static int shell_find_program(const char *name, char output[FS_PATH_CAPACITY]) {
+    char candidate[FS_PATH_CAPACITY];
+    const char *path_value;
+    if (!name || !name[0]) return -1;
+    if (shell_has_path_separator(name)) return shell_try_program(name, output);
+
+    if (ksnprintf(candidate, sizeof(candidate), "%s/%s",
+                  shell_current_directory, name) >= (int)sizeof(candidate))
+        return -1;
+    if (shell_try_program(candidate, output) == 0) return 0;
+
+    path_value = env_get("PATH");
+    while (path_value && *path_value) {
+        char directory[FS_PATH_CAPACITY];
+        usize length = 0;
+        while (path_value[length] && path_value[length] != ':' &&
+               length + 1u < sizeof(directory)) length++;
+        if (path_value[length] == ':' || path_value[length] == '\0') {
+            for (usize i = 0; i < length; ++i) directory[i] = path_value[i];
+            directory[length] = '\0';
+            if (!directory[0]) {
+                if (ksnprintf(candidate, sizeof(candidate), "%s/%s",
+                              shell_current_directory, name) < (int)sizeof(candidate) &&
+                    shell_try_program(candidate, output) == 0) return 0;
+            } else if (ksnprintf(candidate, sizeof(candidate), "%s/%s", directory, name) <
+                       (int)sizeof(candidate) && shell_try_program(candidate, output) == 0) {
+                return 0;
+            }
+        } else return -1; /* Reject an overlong PATH component. */
+        path_value += length;
+        if (*path_value == ':') ++path_value;
+    }
+    return -1;
+}
+
+static int shell_is_builtin(const char *name) {
+    static const char *const builtins[] = {
+        "help","ls","dir","cd","pwd","mkdir","rmdir","touch","new",
+        "cat","type","edit","vi","vim","write","cp","mv","rm","del",
+        "cc","run","cinfo","grep","wc","head","tail","stat","hexdump",
+        "tree","find","du","sha256","crc32","hash","df","diskinfo","disk",
+        "partitions","mounts","devices","cpuinfo","sysinfo","sys","neofetch",
+        "uptime","date","free","meminfo","mem","pmm","paging","vmstat","tasks",
+        "ps","services","service","ipc","events","net","ifconfig","ping","dhcp","dns","web","history",
+        "env","set","unset","whoami","hostname","uname","ver","about","clear","cls",
+        "beep","reboot","halt","poweroff","uuid","random","bootargs","bootlog",
+        "echo","apps","browse","calc","notes","monitor","arcade","which","!!"
+    };
+    for (usize i = 0; i < sizeof(builtins) / sizeof(builtins[0]); ++i)
+        if (eq(name, builtins[i])) return 1;
+    return 0;
+}
+
 static void command_cc(const char *cursor) {
     char source_name[FS_PATH_CAPACITY];
     char output_name[FS_PATH_CAPACITY];
@@ -462,6 +549,10 @@ static void command_cc(const char *cursor) {
     }
 
     status = word(&cursor, option, sizeof(option));
+    if (status < 0) {
+        puts("cc: invalid or overlong output argument\n");
+        return;
+    }
     if (status > 0) {
         if (eq(option, "-o")) {
             if (word(&cursor, output_name, sizeof(output_name)) <= 0) {
@@ -471,8 +562,8 @@ static void command_cc(const char *cursor) {
         } else {
             (void)kstrlcpy(output_name, option, sizeof(output_name));
         }
-        if (word(&cursor, option, sizeof(option)) > 0) {
-            puts("cc: too many arguments; use cc SOURCE.c [-o PROGRAM]\n");
+        if (word(&cursor, option, sizeof(option)) != 0) {
+            puts("cc: too many or invalid arguments; use cc SOURCE.c [-o PROGRAM]\n");
             return;
         }
         if (shell_resolve(output_name, output_path) < 0 || ensure_aex_extension(output_path) < 0) {
@@ -500,13 +591,19 @@ static void command_cc(const char *cursor) {
 static void command_run(const char *cursor) {
     char program_name[FS_PATH_CAPACITY];
     char program_path[FS_PATH_CAPACITY];
+    char extra[FS_PATH_CAPACITY];
     int result;
     if (word(&cursor, program_name, sizeof(program_name)) <= 0) {
         puts("usage: run PROGRAM\n");
         return;
     }
-    if (shell_resolve(program_name, program_path) < 0) {
-        puts("run: program path is invalid or too long\n");
+    if (word(&cursor, extra, sizeof(extra)) != 0) {
+        puts("run: Aiden C programs do not accept command-line arguments yet\n");
+        return;
+    }
+    if (shell_find_program(program_name, program_path) < 0) {
+        puts("run: program not found: "); puts(program_name);
+        puts(" (looked in the current directory and PATH)\n");
         return;
     }
     result = program_run(program_path);
@@ -529,10 +626,11 @@ static void command_cinfo(void) {
     puts("Types           : integer spellings, enums, scalar typedefs, sizeof(type/object)\n");
     puts("Preprocessor    : object macros, undef, if 0/1, ifdef/ifndef, else/endif\n");
     puts("Expressions     : arithmetic, comparisons, logic, bitwise, shifts, ?:, ++/--\n");
-    puts("Built-ins       : stdio subset, string helpers, atoi/abs, ASCII ctype\n");
+    puts("Built-ins       : stdio subset, string/search helpers, rand/srand, atoi/abs, ASCII ctype\n");
     puts("Formatting      : %d/%i/%u/%x/%X/%o/%p/%c/%s/%% (width ignored)\n");
-    puts("Limits          : 768 instructions, 2048 data bytes, 64 globals, 256 global cells,\n");
-    puts("                  4096 local cells, 32 functions, 16 parameters, 64 call frames\n\n");
+    puts("Limits          : 32 KiB source, 2048 instructions, 8 KiB data, 96 functions,\n");
+    puts("                  32 parameters, 1024 global cells, 8192 local cells, 4096 stack,\n");
+    puts("                  128 call frames, 4096 cells per fixed-size array\n\n");
     puts("Not full ISO C: no structs/unions, floats, function pointers, full headers,\n");
     puts("function-like macros, native code, or hosted standard library.\n");
     puts("Types are VM cells, not target ABI widths. Programs share kernel privilege.\n");
@@ -544,7 +642,7 @@ static void shell_list_directory(const char *directory) {
     puts("TYPE       SIZE       NAME\n");
     for (usize i = 0; i < count; i++) {
         char name[FS_PATH_CAPACITY];
-        char line[128];
+        char line[FS_PATH_CAPACITY + 64];
         usize size = 0;
         int type = 0;
         if (fs_get_entry_in_dir(directory, i, name, sizeof(name), &size, &type) < 0) continue;
@@ -562,7 +660,7 @@ static void shell_list_vfs(const char *directory) {
     int found = 0;
     puts("TYPE       SIZE       NAME\n");
     while (vfs_list(directory, index++, &entry) == 0) {
-        char line[128];
+        char line[FS_PATH_CAPACITY + 64];
         found = 1;
         if (entry.type == VFS_TYPE_DIRECTORY)
             ksnprintf(line, sizeof(line), "directory  --         %s/\n", entry.name);
@@ -672,22 +770,30 @@ static void command_hexdump(const char *path) {
 
 static void command_stat(const char *path) {
     vfs_stat_t info;
-    if (vfs_stat_path(path, &info) < 0) {
+    char absolute[FS_PATH_CAPACITY + 1u];
+    int written;
+    if (!path || !path[0]) written = ksnprintf(absolute, sizeof(absolute), "/");
+    else written = ksnprintf(absolute, sizeof(absolute), "/%s", path);
+    if (written < 0 || (usize)written >= sizeof(absolute) ||
+        vfs_stat_path(absolute, &info) < 0) {
         puts("stat: path not found or not visible through VFS\n");
         return;
     }
-    puts("Path       : "); puts(path); puts("\nType       : ");
+    puts("Path       : "); puts(absolute); puts("\nType       : ");
     puts(info.type == VFS_TYPE_DIRECTORY ? "directory\n" : "file\n");
     puts("Size       : "); number((u64)info.size); puts(" bytes\n");
     puts("Read-only  : "); puts(info.read_only ? "yes\n" : "no\n");
 }
+
+static int shell_join_entry(const char *parent, const char *leaf,
+                            char *output, usize capacity);
 
 static void tree_walk(const char *path, int depth) {
     usize count = fs_entry_count_in_dir(path);
     if (depth > 6) { puts("(maximum tree depth reached)\n"); return; }
     for (usize i = 0; i < count; ++i) {
         char name[FS_PATH_CAPACITY], child[FS_PATH_CAPACITY];
-        usize size = 0, used = 0;
+        usize size = 0;
         int type = 0;
         if (fs_get_entry_in_dir(path, i, name, sizeof(name), &size, &type) < 0) continue;
         for (int d = 0; d < depth; ++d) puts("  ");
@@ -696,13 +802,146 @@ static void tree_walk(const char *path, int depth) {
         if (type == FS_ENTRY_DIRECTORY) puts("/");
         puts("\n");
         if (type == FS_ENTRY_DIRECTORY) {
-            while (path[used] && used + 1 < sizeof(child)) { child[used] = path[used]; used++; }
-            if (used && child[used - 1] != '/' && used + 1 < sizeof(child)) child[used++] = '/';
-            for (usize j = 0; name[j] && used + 1 < sizeof(child); ++j) child[used++] = name[j];
-            child[used] = 0;
+            if (shell_join_entry(path, name, child, sizeof(child)) < 0) {
+                for (int d = 0; d <= depth; ++d) puts("  ");
+                puts("(path exceeds DenFS limit; subtree skipped)\n");
+                continue;
+            }
             tree_walk(child, depth + 1);
         }
     }
+}
+
+static int shell_join_entry(const char *parent, const char *leaf,
+                            char *output, usize capacity) {
+    int written;
+    if (!parent || !leaf || !output || !capacity) return -1;
+    written = parent[0] ? ksnprintf(output, capacity, "%s/%s", parent, leaf)
+                        : ksnprintf(output, capacity, "%s", leaf);
+    return written < 0 || (usize)written >= capacity ? -1 : 0;
+}
+
+static int shell_glob_match(const char *pattern, const char *text) {
+    const char *star = 0;
+    const char *retry = 0;
+    if (!pattern || !text) return 0;
+    while (*text) {
+        if (*pattern == '?' || *pattern == *text) { ++pattern; ++text; }
+        else if (*pattern == '*') { star = pattern++; retry = text; }
+        else if (star) { pattern = star + 1; text = ++retry; }
+        else return 0;
+    }
+    while (*pattern == '*') ++pattern;
+    return *pattern == '\0';
+}
+
+static void find_walk(const char *root, const char *pattern, int depth,
+                      u32 *matches) {
+    usize count = fs_entry_count_in_dir(root);
+    if (depth > 6) return;
+    for (usize i = 0; i < count; ++i) {
+        char name[FS_PATH_CAPACITY];
+        char child[FS_PATH_CAPACITY];
+        usize size = 0;
+        int type = 0;
+        if (fs_get_entry_in_dir(root, i, name, sizeof(name), &size, &type) < 0)
+            continue;
+        if (shell_glob_match(pattern, name)) {
+            if (shell_join_entry(root, name, child, sizeof(child)) == 0) {
+                puts("/"); puts(child); puts(type == FS_ENTRY_DIRECTORY ? "/\n" : "\n");
+                ++*matches;
+            }
+        }
+        if (type == FS_ENTRY_DIRECTORY && depth < 6) {
+            if (shell_join_entry(root, name, child, sizeof(child)) == 0)
+                find_walk(child, pattern, depth + 1, matches);
+            else {
+                puts("find: path too deep to inspect: "); puts(name); puts("\n");
+            }
+        }
+    }
+}
+
+static void command_find(const char *cursor) {
+    char first[FS_PATH_CAPACITY];
+    char second[FS_PATH_CAPACITY];
+    char root[FS_PATH_CAPACITY];
+    const char *pattern;
+    u32 matches = 0;
+    int first_status = word(&cursor, first, sizeof(first));
+    int second_status;
+    int extra_status;
+    if (first_status <= 0) { puts("usage: find [PATH] PATTERN\n"); return; }
+    second_status = word(&cursor, second, sizeof(second));
+    extra_status = word(&cursor, root, sizeof(root));
+    if (second_status < 0 || extra_status != 0) {
+        puts("find: too many or overlong arguments\n"); return;
+    }
+    if (second_status > 0) {
+        if (shell_resolve(first, root) < 0 || !fs_is_directory(root)) {
+            puts("find: PATH must be an existing DenFS directory\n"); return;
+        }
+        pattern = second;
+    } else {
+        if (kstrlcpy(root, shell_current_directory, sizeof(root)) >= sizeof(root)) {
+            puts("find: current path is too long\n"); return;
+        }
+        pattern = first;
+    }
+    find_walk(root, pattern, 0, &matches);
+    if (!matches) puts("find: no matching entries\n");
+    else { number(matches); puts(" match(es)\n"); }
+}
+
+static void du_walk(const char *path, int depth, u64 *bytes, u32 *files) {
+    usize count;
+    if (depth > 6) return;
+    count = fs_entry_count_in_dir(path);
+    for (usize i = 0; i < count; ++i) {
+        char name[FS_PATH_CAPACITY];
+        char child[FS_PATH_CAPACITY];
+        usize size = 0;
+        int type = 0;
+        if (fs_get_entry_in_dir(path, i, name, sizeof(name), &size, &type) < 0)
+            continue;
+        if (shell_join_entry(path, name, child, sizeof(child)) < 0) continue;
+        if (type == FS_ENTRY_DIRECTORY) du_walk(child, depth + 1, bytes, files);
+        else { *bytes += (u64)size; ++*files; }
+    }
+}
+
+static void command_du(const char *cursor) {
+    char argument[FS_PATH_CAPACITY];
+    char path[FS_PATH_CAPACITY];
+    u64 bytes = 0;
+    u32 files = 0;
+    int status = word(&cursor, argument, sizeof(argument));
+    int extra_status = word(&cursor, path, sizeof(path));
+    if (status < 0 || extra_status != 0) {
+        puts("usage: du [PATH]\n"); return;
+    }
+    if (status == 0) kstrlcpy(path, shell_current_directory, sizeof(path));
+    else if (shell_resolve(argument, path) < 0) {
+        puts("du: invalid path\n"); return;
+    }
+    if (fs_is_file(path)) {
+        const char *contents = fs_read(path);
+        if (!contents) { filesystem_error("du"); return; }
+        bytes = (u64)kstrnlen(contents, FS_FILE_MAX_BYTES);
+        files = 1;
+    } else if (fs_is_directory(path)) du_walk(path, 0, &bytes, &files);
+    else { puts("du: path not found\n"); return; }
+    puts("Files: "); number(files); puts("  Text data: "); number(bytes);
+    puts(" bytes  Path: /"); puts(path); puts("\n");
+}
+
+
+static int shell_mkdir_parents(const char *relative_path) {
+    if (fs_mkdir_p(relative_path) < 0) {
+        filesystem_error("mkdir");
+        return -1;
+    }
+    return 0;
 }
 
 static void command(const char *line) {
@@ -722,12 +961,46 @@ static void command(const char *line) {
         else help();
         return;
     }
+    if (eq(command_name, "which")) {
+        char name[FS_PATH_CAPACITY];
+        char program[FS_PATH_CAPACITY];
+        if (word(&cursor, name, sizeof(name)) <= 0 ||
+            word(&cursor, program, sizeof(program)) != 0) {
+            puts("usage: which PROGRAM\n"); return;
+        }
+        if (shell_is_builtin(name)) { puts(name); puts(": shell built-in\n"); return; }
+        if (shell_find_program(name, program) == 0) {
+            puts("/"); puts(program); puts("\n"); return;
+        }
+        puts("which: not found: "); puts(name); puts("\n");
+        return;
+    }
     if (eq(command_name, "cc")) { command_cc(cursor); return; }
     if (eq(command_name, "run")) { command_run(cursor); return; }
     if (eq(command_name, "cinfo")) { command_cinfo(); return; }
     if (eq(command_name, "clear") || eq(command_name, "cls")) {
         puts("\033[0m\033[2J\033[H"); return;
     }
+    if (eq(command_name, "apps")) { terminal_apps_list(); return; }
+    if (eq(command_name, "calc")) { skip_spaces(&cursor); terminal_calculator_run(cursor); return; }
+    if (eq(command_name, "browse")) {
+        char path[FS_PATH_CAPACITY];
+        first_status = word(&cursor, first, sizeof(first));
+        if (first_status < 0) { puts("browse: path is too long\n"); return; }
+        if (first_status == 0) (void)kstrlcpy(path, shell_current_directory, sizeof(path));
+        else if (shell_resolve(first, path) < 0) { puts("browse: invalid path\n"); return; }
+        terminal_browse_run(path); return;
+    }
+    if (eq(command_name, "notes")) {
+        char path[FS_PATH_CAPACITY];
+        first_status = word(&cursor, first, sizeof(first));
+        if (first_status < 0) { puts("notes: path is too long\n"); return; }
+        if (first_status == 0) (void)kstrlcpy(path, "home/user/documents/quick-notes.md", sizeof(path));
+        else if (shell_resolve(first, path) < 0) { puts("notes: invalid path\n"); return; }
+        editor_open(path); return;
+    }
+    if (eq(command_name, "monitor")) { terminal_monitor_run(); return; }
+    if (eq(command_name, "arcade")) { terminal_arcade_run(); return; }
     if (eq(command_name, "whoami")) { const char *user = env_get("USER"); puts(user ? user : "local-user"); puts("\n"); return; }
     if (eq(command_name, "hostname")) { const char *host = env_get("HOSTNAME"); puts(host ? host : DENOS_HOSTNAME); puts("\n"); return; }
     if (eq(command_name, "uname")) {
@@ -735,9 +1008,9 @@ static void command(const char *line) {
     }
     if (eq(command_name, "ver")) { puts(DENOS_NAME " version " DENOS_VERSION "\n"); return; }
     if (eq(command_name, "about")) {
-        puts(DENOS_NAME " " DENOS_VERSION " is an independent 64-bit command-line operating system.\n");
-        puts("It includes a kernel heap, physical page allocator, VFS, DenFS, ATA storage,\n");
-        puts("cooperative services, IPC, events, an Ethernet driver and a command shell.\n");
+        puts(DENOS_NAME " " DENOS_VERSION " is an experimental 64-bit operating system.\n");
+        puts("It includes a terminal shell, native text apps and ASCII arcade games,\n");
+        puts("kernel heap, page allocator, VFS, DenFS, ATA storage, services, IPC and Ethernet.\n");
         puts("This is an experimental hobby OS; it is not Linux-compatible. It does not\n");
         puts("yet provide protected user processes or broad hardware support.\n");
         return;
@@ -805,7 +1078,7 @@ static void command(const char *line) {
         const char *contents;
         u8 digest[32]; char hex[65]; char number_text[16];
         if (word(&cursor, first, sizeof(first)) <= 0 || shell_resolve(first, path) < 0 || !(contents = fs_read(path))) { puts("usage: sha256|crc32 FILE (file must be in DenFS)\n"); return; }
-        usize length = kstrnlen(contents, 16384u);
+        usize length = kstrnlen(contents, FS_FILE_MAX_BYTES);
         if (eq(command_name, "sha256")) { sha256_digest(contents, length, digest); sha256_hex(digest, hex); puts(hex); }
         else { ksnprintf(number_text, sizeof(number_text), "%08x", crc32_compute(contents, length)); puts(number_text); }
         puts("  "); puts(first); puts(" ( "); number((u64)length); puts(" bytes )\n"); return;
@@ -860,10 +1133,26 @@ static void command(const char *line) {
         if (word(&cursor, first, sizeof(first)) <= 0) {
             puts("usage: command PATH\n"); return;
         }
-        if (shell_resolve(first, path) < 0) { puts("path is invalid or too long\n"); return; }
         if (eq(command_name, "mkdir")) {
+            int parents = eq(first, "-p");
+            if (parents) {
+                int path_status = word(&cursor, second, sizeof(second));
+                if (path_status <= 0 || word(&cursor, destination, sizeof(destination)) != 0) {
+                    puts("usage: mkdir [-p] PATH\n"); return;
+                }
+                if (shell_resolve(second, path) < 0) { puts("mkdir: invalid path or path too long\n"); return; }
+                if (shell_mkdir_parents(path) < 0) return;
+                return;
+            }
+            if (word(&cursor, second, sizeof(second)) != 0) {
+                puts("usage: mkdir [-p] PATH\n"); return;
+            }
+            if (shell_resolve(first, path) < 0) { puts("mkdir: invalid path or path too long\n"); return; }
             if ((first[0] == '/' ? vfs_mkdir(first) : fs_mkdir(path)) < 0) filesystem_error("mkdir");
-        } else if (eq(command_name, "rmdir")) {
+            return;
+        }
+        if (shell_resolve(first, path) < 0) { puts("path is invalid or too long\n"); return; }
+        if (eq(command_name, "rmdir")) {
             if (first[0] == '/' ? vfs_remove(first) < 0 : (!fs_is_directory(path) || fs_remove(path) < 0)) filesystem_error("rmdir");
         } else if (eq(command_name, "touch") || eq(command_name, "new")) {
             if (fs_touch(path) < 0) filesystem_error("touch");
@@ -915,15 +1204,51 @@ static void command(const char *line) {
         for (int i=0;i<6;i++) { char hex[]="0123456789abcdef"; char pair[3]={hex[status.mac[i]>>4],hex[status.mac[i]&15],0}; puts(pair); if (i<5) puts(":"); }
         puts("\nIPv4: ");
         for (int i=0;i<4;i++) { number(status.ipv4[i]); if (i<3) puts("."); }
-        puts("/24\nGateway: ");
+        puts("\nMask: ");
+        for (int i=0;i<4;i++) { number(status.netmask[i]); if (i<3) puts("."); }
+        puts("\nGateway: ");
         for (int i=0;i<4;i++) { number(status.gateway[i]); if (i<3) puts("."); }
-        puts("\nFrames RX/TX: "); number(status.rx_frames); puts("/"); number(status.tx_frames); puts("\nConfiguration: static QEMU user-mode profile (DHCP/DNS not implemented)\n");
+        puts("\nDNS: ");
+        for (int i=0;i<4;i++) { number(status.dns[i]); if (i<3) puts("."); }
+        puts("\nFrames RX/TX: "); number(status.rx_frames); puts("/"); number(status.tx_frames);
+        puts("\nConfiguration: "); puts(status.dhcp_configured ? "DHCP lease\n" : "static fallback profile\n");
+        return;
+    }
+    if (eq(command_name, "dhcp")) {
+        puts("Requesting network settings with DHCP...\n");
+        if (net_dhcp_configure(500u) < 0) puts("dhcp: no valid lease received; current network settings were kept\n");
+        else puts("DHCP configuration applied. Run 'net' to inspect the lease.\n");
+        return;
+    }
+    if (eq(command_name, "dns")) {
+        u8 address[4];
+        if (word(&cursor, first, sizeof(first)) <= 0) { puts("usage: dns HOST\n"); return; }
+        skip_spaces(&cursor);
+        if (*cursor) { puts("usage: dns HOST\n"); return; }
+        if (net_dns_resolve(first, address, 300u) < 0) { puts("dns: lookup failed\n"); return; }
+        puts(first); puts(" -> ");
+        for (u32 i = 0; i < 4; ++i) { number(address[i]); if (i < 3) puts("."); }
+        puts("\n");
+        return;
+    }
+    if (eq(command_name, "web")) {
+        char url[512];
+        int result;
+        if (word(&cursor, url, sizeof(url)) <= 0) { puts("usage: web https://HOST[:PORT]/PATH (or http:// for unencrypted HTTP)\n"); return; }
+        skip_spaces(&cursor);
+        if (*cursor) { puts("web: quote the URL if it contains spaces; only one URL is accepted\n"); return; }
+        result = net_http_get(url);
+        if (result < 0) puts("\nweb: page load failed\n");
         return;
     }
     if (eq(command_name, "ping")) {
         u8 address[4];
-        if (word(&cursor, first, sizeof(first)) <= 0) { puts("usage: ping A.B.C.D\n"); return; }
-        if (parse_ipv4(first, address) < 0) { puts("ping: invalid IPv4 address\n"); return; }
+        if (word(&cursor, first, sizeof(first)) <= 0) { puts("usage: ping HOST\n"); return; }
+        skip_spaces(&cursor);
+        if (*cursor) { puts("usage: ping HOST\n"); return; }
+        if (parse_ipv4(first, address) < 0 && net_dns_resolve(first, address, 300u) < 0) {
+            puts("ping: could not resolve host\n"); return;
+        }
         puts("PING: waiting for ICMP echo reply...\n");
         int result=net_ping(address,300u);
         puts(result==0 ? "Reply received\n" : result==-1 ? "Network interface unavailable\n" : result==-2 ? "ARP resolution timed out\n" : "Request timed out or transmit failed\n");
@@ -953,7 +1278,7 @@ static void command(const char *line) {
         puts("Storage device: "); puts(fs_disk_model()); puts("\nTransport: legacy IDE PIO\nSectors: ");
         number((u64)fs_disk_sector_count()); puts("\nCapacity: ");
         number((u64)fs_disk_size_bytes()); puts(" bytes\nFilesystem: ");
-        if (fs_is_persistent()) puts("persistent DenFS v3 on ATA\n");
+        if (fs_is_persistent()) puts("persistent DenFS v4 on ATA\n");
         else {
             puts("temporary RAM fallback\nReason: ");
             puts(fs_storage_name());
@@ -1097,6 +1422,8 @@ static void command(const char *line) {
         tree_walk(path, 0);
         return;
     }
+    if (eq(command_name, "find")) { command_find(cursor); return; }
+    if (eq(command_name, "du")) { command_du(cursor); return; }
     if (eq(command_name, "echo")) { skip_spaces(&cursor); puts(cursor); puts("\n"); return; }
     if (eq(command_name, "reboot")) { puts("Rebooting...\n"); cpu_reboot(); }
     if (eq(command_name, "halt") || eq(command_name, "poweroff")) { puts("System halted. You may close QEMU.\n"); cpu_halt(); }
@@ -1132,7 +1459,7 @@ static void shell_print_prompt(void) {
 }
 
 static void shell_redraw_line(const char *line, usize cursor) {
-    usize length = kstrnlen(line, 256u);
+    usize length = kstrnlen(line, 512u);
     puts("\r\033[K");
     shell_print_prompt();
     puts(line);
@@ -1166,17 +1493,25 @@ static void shell_tab_complete(char *line, usize capacity,
     static const char *commands[] = {
         "help","ls","cd","pwd","mkdir","rmdir","touch","cat","edit","vim",
         "write","cp","mv","rm","cc","run","cinfo","grep","wc","head","tail",
-        "stat","hexdump","tree","sha256","crc32","hash","df","diskinfo","partitions",
+        "stat","hexdump","tree","find","du","which","sha256","crc32","hash","df","diskinfo","partitions",
         "mounts","devices","cpuinfo","sysinfo","uptime","date","free","pmm","paging","vmstat","tasks",
-        "services","service","ipc","events","net","ping","history","env","set","unset",
+        "services","service","ipc","events","net","ping","dhcp","dns","web","history","env","set","unset",
         "whoami","hostname","uname","ver","about","clear","beep","reboot","halt","uuid",
-        "random","bootargs","bootlog","echo","!!"
+        "random","bootargs","bootlog","echo","apps","browse","calc","notes","monitor","arcade","!!"
     };
     char prefix[FS_PATH_CAPACITY];
     char matches[12][FS_PATH_CAPACITY];
     int match_count = 0;
-    usize start = *cursor;
+    usize start;
     int command_position;
+    if (!line || !length || !cursor || capacity < 2u) return;
+    /* Keep the editor's internal cursor/length invariant local to completion
+     * too. This prevents a stale history/completion position from indexing
+     * before the initialized portion of the command buffer. */
+    if (*length >= capacity) *length = capacity - 1u;
+    line[*length] = 0;
+    if (*cursor > *length) *cursor = *length;
+    start = *cursor;
     while (start && line[start - 1u] != ' ' && line[start - 1u] != '\t') start--;
     if (*cursor < *length) { serial_putc('\a'); return; }
     usize prefix_length = *cursor - start;
@@ -1226,9 +1561,11 @@ static void shell_tab_complete(char *line, usize capacity,
 static void shell_readline(char *line, usize capacity) {
     usize length = 0, cursor = 0;
     int history_offset = -1;
-    char draft[256] = {0};
+    char draft[512] = {0};
     if (!line || capacity < 2u) return;
-    line[0] = '\0';
+    /* Initialize the complete editable line so defensive cursor bounds and
+     * completion scans never observe indeterminate stack bytes. */
+    for (usize i = 0; i < capacity; ++i) line[i] = 0;
     for (;;) {
         int key = serial_getkey();
         if (key == '\r' || key == '\n') {
@@ -1287,8 +1624,8 @@ static void shell_readline(char *line, usize capacity) {
 }
 
 void shell_run(void) {
-    char line[256];
-    char expanded[256];
+    char line[512];
+    char expanded[512];
 
     puts("DenOS interactive shell\nType help for a command list. Use arrows, Home/End, Tab completion, and Up/Down history.\n\n");
     (void)env_set("PWD", "/home/user");

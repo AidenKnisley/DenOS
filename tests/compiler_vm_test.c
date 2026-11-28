@@ -100,6 +100,69 @@ int main(void) {
         return 1;
     }
 
+    /* Expanded C library coverage: bounded strings, character-set scans, and PRNG. */
+    captured_len = 0;
+    captured[0] = 0;
+    const char *extended_lib_program =
+        "#include <string.h>\n#include <stdlib.h>\n"
+        "int main(void) { char source[32]; char output[32]; char *found; long first;\n"
+        "  strcpy(source, \"aabccxyz\");\n"
+        "  if (strnlen(source, 2) != 2 || strnlen(source, 32) != 8) return 1;\n"
+        "  if (strspn(source, \"ab\") != 3 || strcspn(source, \"xy\") != 5) return 2;\n"
+        "  found = strpbrk(source, \"yz\"); if (!found || *found != 'y') return 3;\n"
+        "  strcpy(output, \"Den\"); strncat(output, \"OS kernel\", 2);\n"
+        "  if (strcmp(output, \"DenOS\") != 0) return 4;\n"
+        "  srand(1234); first = rand(); srand(1234);\n"
+        "  if (first < 0 || rand() != first) return 5;\n"
+        "  puts(output); return 0; }\n";
+    image_size = c_compile(extended_lib_program, image, sizeof(image));
+    if (image_size <= 0 || c_execute(image) != 0 || !strstr(captured, "DenOS\n")) {
+        fprintf(stderr, "extended library compile=%d error=%s output=%s\n",
+                image_size, c_compile_error(), captured);
+        fail("new bounded string, span/search, or random built-ins failed");
+        return 1;
+    }
+
+    /* The new compiler limits accept >768 instructions and >8 KiB source files. */
+    char larger_source[16000];
+    usize larger_length = 0;
+    const char *prefix = "int main(void) { int count = 0;\n";
+    while (prefix[larger_length]) { larger_source[larger_length] = prefix[larger_length]; larger_length++; }
+    for (int i = 0; i < 260; ++i) {
+        const char *statement = "count += 1;\n";
+        for (usize j = 0; statement[j]; ++j) larger_source[larger_length++] = statement[j];
+    }
+    const char *suffix = "return count == 260 ? 42 : 1; }\n";
+    for (usize j = 0; suffix[j]; ++j) larger_source[larger_length++] = suffix[j];
+    larger_source[larger_length] = 0;
+    image_size = c_compile(larger_source, image, sizeof(image));
+    if (image_size <= 0 || c_execute(image) != 42) {
+        fprintf(stderr, "large program compile=%d error=%s\n", image_size, c_compile_error());
+        fail("compiler did not accept a program larger than the old instruction limit");
+        return 1;
+    }
+
+    /* A function frame can now use more than the previous 4096-cell limit. */
+    const char *large_frame_program =
+        "int main(void) { int first[3000]; int second[2000]; "
+        "first[0] = 15; second[0] = 27; return first[0] + second[0]; }";
+    image_size = c_compile(large_frame_program, image, sizeof(image));
+    if (image_size <= 0 || c_execute(image) != 42) {
+        fprintf(stderr, "large frame compile=%d error=%s\n", image_size, c_compile_error());
+        fail("compiler did not accept a function frame larger than 4096 cells");
+        return 1;
+    }
+
+    char long_source[12000];
+    memset(long_source, ' ', 9000);
+    strcpy(long_source + 9000, "int main(void) { return 42; }");
+    image_size = c_compile(long_source, image, sizeof(image));
+    if (image_size <= 0 || c_execute(image) != 42) {
+        fprintf(stderr, "long source compile=%d error=%s\n", image_size, c_compile_error());
+        fail("compiler did not accept source larger than 8 KiB");
+        return 1;
+    }
+
     /* AEX1 and AEX2 executables from earlier releases remain valid. */
     const char legacy_image[] = "AEX1" "0002" "0000"
                                  "012A000000" "1B00000000";
@@ -423,7 +486,7 @@ int main(void) {
     captured[0] = 0;
     const char *too_deep =
         "int descend(int n) { if (n == 0) return 0; return descend(n - 1) + 1; } "
-        "int main(void) { return descend(100); }";
+        "int main(void) { return descend(200); }";
     image_size = c_compile(too_deep, image, sizeof(image));
     if (image_size <= 0 || c_execute(image) != -1 ||
         !strstr(captured, "function call stack limit")) {
@@ -653,6 +716,72 @@ int main(void) {
         return 1;
     }
 
-    puts("Compiler/VM tests passed: AEX1-AEX5 compatibility, AEX6 macros/conditionals/typedefs, global scalars/arrays/pointers, switch, enums, sizeof, functions/recursion, strings/character helpers, extended printf, 64-bit literals, operators, scopes, arrays, diagnostics, formatted I/O, arithmetic fault traps, malformed images, and instruction budget.");
+    /* An oversized identifier must be rejected without overflowing the
+     * compiler's fixed-size local/global name buffers during error recovery. */
+    char oversized_identifier_source[256];
+    const char *oversized_local_prefix = "int main(void) { int ";
+    usize oversized_used = 0;
+    while (oversized_local_prefix[oversized_used]) {
+        oversized_identifier_source[oversized_used] = oversized_local_prefix[oversized_used];
+        ++oversized_used;
+    }
+    for (int i = 0; i < 80; ++i) oversized_identifier_source[oversized_used++] = 'x';
+    const char *oversized_local_suffix = " = 1; return 0; }";
+    for (usize i = 0; oversized_local_suffix[i]; ++i)
+        oversized_identifier_source[oversized_used++] = oversized_local_suffix[i];
+    oversized_identifier_source[oversized_used] = 0;
+    if (c_compile(oversized_identifier_source, image, sizeof(image)) >= 0 ||
+        !strstr(c_compile_error(), "identifier is too long")) {
+        fail("overlong local identifiers were not safely rejected");
+        return 1;
+    }
+    oversized_used = 0;
+    for (int i = 0; i < 80; ++i) oversized_identifier_source[oversized_used++] = 'g';
+    const char *oversized_global_suffix = "(void); int main(void) { return 0; }";
+    for (usize i = 0; oversized_global_suffix[i]; ++i)
+        oversized_identifier_source[oversized_used++] = oversized_global_suffix[i];
+    oversized_identifier_source[oversized_used] = 0;
+    if (c_compile(oversized_identifier_source, image, sizeof(image)) >= 0 ||
+        !strstr(c_compile_error(), "identifier is too long")) {
+        fail("overlong global identifiers were not safely rejected");
+        return 1;
+    }
+
+    /* A single long source line used to allocate two 32 KiB arrays on the
+     * small kernel stack. The preprocessor scratch must stay off-stack. */
+    char long_line_source[30000];
+    usize long_line_used = 0;
+    long_line_source[long_line_used++] = '/';
+    long_line_source[long_line_used++] = '*';
+    for (int i = 0; i < 27000; ++i) long_line_source[long_line_used++] = 'x';
+    const char *long_line_suffix = "*/ int main(void) { return 42; }";
+    for (usize i = 0; long_line_suffix[i]; ++i)
+        long_line_source[long_line_used++] = long_line_suffix[i];
+    long_line_source[long_line_used] = 0;
+    image_size = c_compile(long_line_source, image, sizeof(image));
+    if (image_size <= 0 || c_execute(image) != 42) {
+        fprintf(stderr, "long-line source compile=%d error=%s\n", image_size, c_compile_error());
+        fail("preprocessor did not safely handle a source line larger than the kernel stack");
+        return 1;
+    }
+
+    /* The documented 32 KiB source limit includes all source bytes while the
+     * work buffers still need one extra terminator byte. */
+    char exact_limit_source[32769];
+    const char *exact_limit_suffix = "*/ int main(void) { return 42; }";
+    usize exact_limit_suffix_length = strlen(exact_limit_suffix);
+    exact_limit_source[0] = '/'; exact_limit_source[1] = '*';
+    for (usize i = 2; i < 32768u - exact_limit_suffix_length; ++i) exact_limit_source[i] = 'x';
+    memcpy(exact_limit_source + 32768u - exact_limit_suffix_length,
+           exact_limit_suffix, exact_limit_suffix_length);
+    exact_limit_source[32768] = 0;
+    image_size = c_compile(exact_limit_source, image, sizeof(image));
+    if (image_size <= 0 || c_execute(image) != 42) {
+        fprintf(stderr, "exact-limit source compile=%d error=%s\n", image_size, c_compile_error());
+        fail("compiler rejected or mishandled the exact 32768-byte source limit");
+        return 1;
+    }
+
+    puts("Compiler/VM tests passed: legacy AEX compatibility, expanded AEX6 limits, macros/conditionals/typedefs, global scalars/arrays/pointers, switch/enums, sizeof, functions/recursion, string/ctype/search/PRNG built-ins, formatted I/O, operators/scopes/arrays, diagnostics, memory and arithmetic safety, malformed images, and instruction budget.");
     return 0;
 }

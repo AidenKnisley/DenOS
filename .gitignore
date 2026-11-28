@@ -1,4 +1,5 @@
 /build/
+/build-tls/
 *.o
 *.d
 *.iso
@@ -6,3 +7,8 @@
 *.vdi
 *.qcow2
 *.elf
+
+# Persistent DenOS data and backups are local user state.
+denos-data.img.backup
+denos-data.img.manual-backup
+denos-data.img.tmp.*
